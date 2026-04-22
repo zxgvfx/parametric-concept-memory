@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+.Python
+*.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Experiment outputs (keep shipped checkpoints, ignore freshly-generated data)
+outputs/**
+!outputs/ans_encoder/
+!outputs/ans_encoder/final.pt
+!outputs/ans_encoder/eval_report.json
+!outputs/.gitkeep
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Logs and temp
+*.log
+/tmp/

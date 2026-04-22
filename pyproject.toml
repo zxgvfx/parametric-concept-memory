@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "parametric-concept-memory"
+version = "0.1.0"
+description = "Parametric Concept Memory (PCM): a concept-graph memory where every concept node owns a multi-facet parameter bundle consumed by task-specific muscles via contextual collapse."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Percept PCM authors" },
+]
+keywords = [
+    "concept-memory",
+    "interpretability",
+    "parametric-memory",
+    "concept-graph",
+    "attribution",
+    "cognitive-architecture",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.1,<3",
+    "numpy>=1.24",
+    "scipy>=1.11",
+    "scikit-learn>=1.4",
+    "matplotlib>=3.8",
+]
+
+[project.urls]
+Homepage = "https://github.com/zxgvfx/parametric-concept-memory"
+Repository = "https://github.com/zxgvfx/parametric-concept-memory"
+Paper = "https://github.com/zxgvfx/parametric-concept-memory/blob/main/PAPER.md"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pcm*", "experiments*"]
+exclude = ["outputs*", "docs*", "tests*"]
