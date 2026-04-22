@@ -1,0 +1,48 @@
+cff-version: 1.2.0
+message: >-
+  If you use Parametric Concept Memory (PCM) — either the framework
+  code or the four-domain empirical findings — in academic work,
+  please cite the release below.
+type: software
+title: "Parametric Concept Memory (PCM)"
+version: "0.1.0"
+date-released: 2026-04-22
+license: MIT
+repository-code: "https://github.com/zxgvfx/parametric-concept-memory"
+url: "https://github.com/zxgvfx/parametric-concept-memory"
+authors:
+  - alias: zxgvfx
+    name: "zxgvfx"
+abstract: >-
+  A concept memory framework where every ConceptNode in a symbolic
+  graph owns a multi-facet parameter bundle, consumed on demand by
+  task-specific muscle modules via a contextual-collapse operation.
+  Empirically, the same framework induces bundle geometry that
+  tracks each task's topology — linear for numbers, circular for
+  colors, 2-D lattice for a spatial grid, prototype-clustered for
+  categorical phonemes — with no domain-specific architectural
+  change. Cross-muscle alignment is governed by facet-level
+  algebraic compatibility (hypothesis H5″, populated across all
+  four cells of a 2 × 2 schema). A post-hoc bundle swap establishes
+  causal ownership via textbook double dissociation.
+keywords:
+  - parametric memory
+  - concept graph
+  - concept bottleneck
+  - contextual collapse
+  - attribution
+  - interpretability
+  - topology-adaptive representation
+  - cognitive architecture
+  - mechanistic interpretability
+preferred-citation:
+  type: article
+  title: "Concepts Collapse into Muscles: Domain-Topology-Adaptive Parametric Concept Memory"
+  year: 2026
+  authors:
+    - alias: zxgvfx
+      name: "zxgvfx"
+  # Placeholders — fill in once the preprint / published version exists:
+  # doi: "10.5281/zenodo.XXXXXXX"
+  # url: "https://arxiv.org/abs/XXXX.XXXXX"
+  # journal: "..."

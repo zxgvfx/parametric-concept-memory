@@ -1,5 +1,11 @@
 # Parametric Concept Memory (PCM)
 
+[![CI](https://github.com/zxgvfx/parametric-concept-memory/actions/workflows/ci.yml/badge.svg)](https://github.com/zxgvfx/parametric-concept-memory/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![PyTorch 2.1+](https://img.shields.io/badge/pytorch-2.1%2B-ee4c2c.svg)](https://pytorch.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Paper](https://img.shields.io/badge/paper-PAPER.md-brightgreen.svg)](./PAPER.md)
+
 > *Concepts Collapse into Muscles — Domain-Topology-Adaptive Parametric
 > Concept Memory.*
 > Code and full paper for the four-domain PCM study.

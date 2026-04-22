@@ -1,11 +1,24 @@
 # Concepts Collapse into Muscles: Domain-Topology-Adaptive Parametric Concept Memory
 
 **Anonymous authors**
-*Percept AGI · 2026-04-22*
+*2026-04-22* — retained as Anonymous for double-blind review;
+the artifact repository (post-acceptance public copy) is at
+`github.com/zxgvfx/parametric-concept-memory`.
 
-**Artifact**: `mind/core/cognition/language/` (framework),
-`mind/experiments/language/` (replications). All experiments reproduce on a
-single RTX 4090 within 15 minutes.
+**Artifact**: `pcm/` (framework), `experiments/` (replications).
+All experiments reproduce on a single RTX 4090 within ≈ 25 minutes
+(≪ 1 hour on CPU for everything except the *N* = 100 numerical
+study).
+
+![Four-domain universality of bundle geometry](./docs/figures/F4_four_domain_universality.png)
+
+*Figure 1* (money plot — see also §6 / F4 and §8 / F7): the **same**
+PCM framework, with no domain-specific architectural change, induces
+bundle geometries that match each domain's topology. Top-left:
+linear number line (ρ = 0.991). Top-right: circular hue ring
+(ρ_circular = 0.977). Bottom-left: 2-D spatial lattice
+(Procrustes-aligned MDS, disparity 0.07). Bottom-right: 20
+phoneme cos heatmap with emergent manner-class block structure.
 
 ---
 
@@ -395,6 +408,8 @@ See **Figure 2** for the two facets' 7×7 cos heatmaps on a single
 dual-muscle seed: both facets reproduce the linear number line
 (ρ_add = +0.973, ρ_ord = +0.918) with cross-facet align ρ = +0.847.
 
+![F2 Number bundle cos heatmaps — arith + ord](./docs/figures/F2_number_cos_heatmaps.png)
+
 ### 4.4  Robustness, Scale, and Purity
 
 - **Shuffle counterfactual.** Train with `concept_id → bundle` randomly
@@ -665,6 +680,12 @@ shows the space-grid Procrustes alignment collapsing from disp 0.07
 (trained) to disp 0.97 (shuffled-identity counterfactual). Full
 per-seed data: `SPACE_CONCEPT_STUDY.md`, `PHONEME_CONCEPT_STUDY.md`.
 
+![F4 Four-domain universality of bundle geometry](./docs/figures/F4_four_domain_universality.png)
+
+![F7 H5″ four-domain cross-facet alignment schema](./docs/figures/F7_h5pp_alignment_schema.png)
+
+![F8 Space grid MDS: trained vs shuffled-identity counterfactual](./docs/figures/F8_space_mds_trained_vs_shuffle.png)
+
 ---
 
 ## 7  Experiment 4 — Pure Base-10 Emergence (Negative)
@@ -696,6 +717,8 @@ slightly negative; `resΔtens` is positive but purely a second-order
 artefact of linear ordinality (same-decade pairs are closer on average).
 **Figure 5** plots avg cos(n, n+k) versus shift k for N ∈ {50, 100}:
 both curves are smooth monotone-linear with **no peak at k = 10**.
+
+![F5 Base-10 emergence null — no peak at k=10](./docs/figures/F5_base10_spike_null.png)
 
 ### 7.3  Interpretation
 
@@ -735,6 +758,8 @@ both) × (involving-swap, not-involving) × (muscle A, muscle B) for
 both domains: the double-dissociation signature is unmistakable. The
 bundle is not *a correlate* of identity; it **is** the identity, to
 the extent the downstream muscles can see it.
+
+![F6 Post-hoc bundle swap — textbook double dissociation](./docs/figures/F6_swap_dissociation.png)
 
 **Geometry tracks task topology, not supervision geometry — across
 four topologies.** Linear for numbers, circular for colors, 2-D
