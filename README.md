@@ -210,4 +210,9 @@ If you use PCM or these results, please cite:
 
 ## License
 
-MIT — see [`LICENSE`](./LICENSE).
+- **Code** (`pcm/`, `experiments/`, `tests/`, `outputs/ans_encoder/`)
+  is released under **MIT** — see [`LICENSE`](./LICENSE).
+- **Paper and figures** (`PAPER.md`, `submission/`, `docs/`) are
+  released under **CC BY 4.0** — attribution required, derivatives
+  and commercial use allowed. Matches the license attached to the
+  arXiv preprint.
