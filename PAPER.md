@@ -1,9 +1,14 @@
 # Concepts Collapse into Muscles: Domain-Topology-Adaptive Parametric Concept Memory
 
-**Anonymous authors**
-*2026-04-22* — retained as Anonymous for double-blind review;
-the artifact repository (post-acceptance public copy) is at
-`github.com/zxgvfx/parametric-concept-memory`.
+**Xugang Zhang** ([GitHub: zxgvfx](https://github.com/zxgvfx))
+*2026-04-22*
+
+Artifact repository: `github.com/zxgvfx/parametric-concept-memory`.
+
+> Note for later double-blind submissions: if submitting to a
+> double-blind venue (e.g. NeurIPS / ICLR / ICML main track), strip
+> this author line in the submission copy — the public repository
+> here is non-anonymous.
 
 **Artifact**: `pcm/` (framework), `experiments/` (replications).
 All experiments reproduce on a single RTX 4090 within ≈ 25 minutes
