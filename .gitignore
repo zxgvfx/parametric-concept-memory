@@ -32,3 +32,14 @@ outputs/**
 # Logs and temp
 *.log
 /tmp/
+
+# LaTeX build artefacts (keep main.pdf; drop everything latexmk creates)
+submission/**/*.aux
+submission/**/*.fdb_latexmk
+submission/**/*.fls
+submission/**/*.log
+submission/**/*.out
+submission/**/*.toc
+submission/**/*.xdv
+submission/**/*.synctex.gz
+submission/**/_minted-*/

@@ -1,0 +1,87 @@
+% ── Common preamble — works with XeLaTeX / LuaLaTeX on Overleaf ──
+% Compile with:  latexmk -xelatex main.tex   (recommended)
+
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{url}
+\usepackage{microtype}
+\usepackage[labelformat=empty, skip=4pt, font=small]{caption}
+% Captions already embed their own "F2 / F4 / ..." labels, so we
+% suppress LaTeX's auto "Figure N:" prefix to avoid "Figure 3: F4 ..."
+% double-labelling that mismatches in-text "Figure F4" references.
+\usepackage[unicode, hidelinks, colorlinks=true, linkcolor=blue,
+            citecolor=blue, urlcolor=blue,
+            pdfborder={0 0 0}]{hyperref}
+\usepackage{newunicodechar}
+
+% ── Unicode fallbacks for a few glyphs missing from DejaVu Serif ──
+\newunicodechar{✓}{\ensuremath{\checkmark}}
+\newunicodechar{✗}{\ensuremath{\times}}
+\newunicodechar{⋃}{\ensuremath{\bigcup}}
+\newunicodechar{⇔}{\ensuremath{\Leftrightarrow}}
+\newunicodechar{∞}{\ensuremath{\infty}}
+
+% ── pandoc-style syntax highlighting environments (minimal stub) ──
+% pandoc emits \begin{Shaded}\begin{Highlighting}[]...\end{Highlighting}\end{Shaded}
+% around fenced code blocks. Provide plain-verbatim fallbacks.
+\usepackage{fancyvrb}
+\DefineVerbatimEnvironment{Highlighting}{Verbatim}{
+  fontsize=\small, commandchars=\\\{\}, frame=single, framerule=0.2pt,
+  rulecolor=\color{gray!50}, framesep=1mm}
+\newenvironment{Shaded}{}{}
+% pandoc's token macros (all fall back to plain text, preserving content)
+\newcommand{\NormalTok}[1]{#1}
+\newcommand{\KeywordTok}[1]{\textcolor{blue!70!black}{\textbf{#1}}}
+\newcommand{\OperatorTok}[1]{\textcolor{black}{#1}}
+\newcommand{\DataTypeTok}[1]{\textcolor{teal!70!black}{#1}}
+\newcommand{\OtherTok}[1]{\textcolor{black}{#1}}
+\newcommand{\CharTok}[1]{\textcolor{red!70!black}{#1}}
+\newcommand{\StringTok}[1]{\textcolor{red!70!black}{#1}}
+\newcommand{\CommentTok}[1]{\textcolor{gray!70}{\textit{#1}}}
+\newcommand{\FunctionTok}[1]{\textcolor{purple!70!black}{#1}}
+\newcommand{\ControlFlowTok}[1]{\textcolor{blue!70!black}{\textbf{#1}}}
+\newcommand{\BuiltInTok}[1]{\textcolor{black}{#1}}
+\newcommand{\VariableTok}[1]{#1}
+\newcommand{\ImportTok}[1]{\textcolor{blue!70!black}{#1}}
+\newcommand{\DecValTok}[1]{\textcolor{orange!70!black}{#1}}
+\newcommand{\FloatTok}[1]{\textcolor{orange!70!black}{#1}}
+\newcommand{\AttributeTok}[1]{\textcolor{teal!70!black}{#1}}
+\newcommand{\SpecialCharTok}[1]{#1}
+\newcommand{\SpecialStringTok}[1]{#1}
+\newcommand{\VerbatimStringTok}[1]{#1}
+\newcommand{\ExtensionTok}[1]{#1}
+
+% Unicode font setup (XeLaTeX / LuaLaTeX). Comment this block out if
+% compiling with pdflatex and replacing unicode math with macros.
+%
+% DejaVu Serif has the Greek letters, arrows and math symbols used
+% inline in the text; Latin Modern Math handles unicode math.
+\usepackage{fontspec}
+\defaultfontfeatures{Ligatures=TeX}
+\setmainfont{DejaVu Serif}[Scale=0.95]
+\setsansfont{DejaVu Sans}[Scale=0.90]
+\setmonofont{DejaVu Sans Mono}[Scale=0.88]
+
+\usepackage{unicode-math}
+\setmathfont{Latin Modern Math}
+
+% pandoc-default defs we rely on
+\providecommand{\tightlist}{\setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+\providecommand{\passthrough}[1]{#1}
+\providecommand{\real}[1]{#1}
+
+% Prevent overfull hboxes from dumping black rules
+\setlength{\emergencystretch}{3em}
+
+% Section spacing (modest, not too aggressive)
+\usepackage{titlesec}
+\titlespacing*{\section}{0pt}{2.2ex plus 0.5ex minus 0.2ex}{1.0ex plus 0.2ex}
+\titlespacing*{\subsection}{0pt}{1.8ex plus 0.4ex minus 0.2ex}{0.6ex plus 0.2ex}
+
+% Table text niceties
+\renewcommand{\arraystretch}{1.1}

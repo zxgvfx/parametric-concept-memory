@@ -1,0 +1,53 @@
+Interpretability routinely asks ``which neurons represent concept \emph{X}?''. We
+argue this question is ill-posed until parameters are explicitly
+\emph{attached} to concepts rather than to layers. We introduce \textbf{Parametric
+Concept Memory (PCM)}: every ConceptNode in a symbolic graph owns a
+multi-facet parameter bundle, which is consumed on demand by task-specific
+``muscle'' modules via an operation we call \textbf{contextual collapse}. Beyond
+architectural attribution (which holds by construction), we establish
+three empirical findings across \textbf{four domains} spanning linear,
+circular, 2-D lattice, and discrete-categorical topologies:
+
+\begin{enumerate}
+\def\labelenumi{\arabic{enumi}.}
+\tightlist
+\item
+  \textbf{Four-domain universality of geometry emergence}. A single
+  arithmetic muscle on 1--30 induces a \textbf{linear number line}
+  (ρ = 0.991, \emph{N} = 30); a single mixing muscle on 12 hues induces
+  a \textbf{circular hue ring} (ρ\_circular = 0.977, radial residual ≤ 11 \%,
+  5/5 seeds cyclic); two muscles on a 5×5 grid induce a \textbf{2-D
+  lattice} (ρ\_L1 = 0.860, MDS Procrustes disparity 0.07, 3/3 seeds);
+  three muscles on 20 phonemes induce \textbf{prototype clusters} per
+  categorical axis (intra-inter cos gap +1.2 to +2.0, 3/3 seeds).
+  The same framework and the same code \textbf{auto-adapt to the task's
+  topology}.
+\item
+  \textbf{Facet-algebra gates cross-muscle alignment (H5'\,')}. The naive
+  hypothesis that multiple muscles cause coherence (H5) is
+  \emph{decisively refuted} (Welch \emph{p} = 0.93, \emph{N} = 10 seeds). The
+  refined claim --- that cross-facet alignment reflects \emph{compatible
+  facet-level algebras} --- populates all four cells of a 2 × 2
+  prediction schema: same algebra ⇒ strong alignment (numbers
+  ρ = 0.91 ± 0.04, permutation \emph{p} = 0.003; colors
+  ρ = 0.38 ± 0.29, permutation \emph{p} = 0.016); vector-vs-scalar
+  mismatch in a shared domain ⇒ null (space ρ = −0.03, \emph{p} = 0.77);
+  orthogonal categorical axes ⇒ null-to-residual (phonemes
+  \textbar ρ\textbar{} ≤ 0.12, \emph{p} ≥ 0.04).
+\item
+  \textbf{Pure emergence of base-10 fails}. Without slot / carry priors, a
+  flat PCM cannot induce digit factorisation from arithmetic signal
+  alone (spike₁₀ ≈ 0.001, \emph{p} = 0.44). This marks a clean boundary:
+  PCM grants \emph{geometric} emergence, not algorithmic emergence.
+\end{enumerate}
+
+A counterfactual shuffle collapses every positive geometry indicator
+(\textbar ρ\textbar{} 0.97 → 0.09 for circular, 0.97 → 0.18 for linear), confirming the
+geometry depends on concept identity rather than on training artefacts.
+A \textbf{post-hoc bundle swap} (Appendix B) closes the loop causally: in
+both domains, swapping the trained bundle of two concepts on one facet
+only collapses exactly the muscle consuming that facet on exactly the
+pairs involving those two concepts (number: 100 \% → 18.2 \%; color:
+100 \% → 5.3 \%), while the other muscle and all other concepts remain
+at 100 \% --- a textbook double dissociation establishing that \textbf{the
+bundle is the concept's semantic identity, not a correlate of it}.

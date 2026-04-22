@@ -1,0 +1,44 @@
+% ─────────────────────────────────────────────────────────────────
+%  Concepts Collapse into Muscles: Domain-Topology-Adaptive PCM
+%  arXiv-ready version — non-blind, with author info and repo link.
+%
+%  Compile:   latexmk -xelatex main.tex
+%  Or, on arXiv's side: arXiv runs pdflatex by default. To make this
+%  tree compile with pdflatex, comment out the \usepackage{fontspec}
+%  block inside preamble_common.tex and switch the engine to
+%  \documentclass{article} + pdflatex -shell-escape main.tex.
+% ─────────────────────────────────────────────────────────────────
+
+\documentclass[11pt,letterpaper]{article}
+
+\usepackage[margin=1in]{geometry}
+
+\input{preamble_common.tex}
+
+% ── Title block ──────────────────────────────────────────────────
+\title{%
+  \textbf{Concepts Collapse into Muscles:} \\[2pt]
+  \large Domain-Topology-Adaptive Parametric Concept Memory
+}
+\author{%
+  Xugang Zhang \\
+  \small GitHub: \href{https://github.com/zxgvfx}{zxgvfx} \\
+  \small Code: \url{https://github.com/zxgvfx/parametric-concept-memory}
+}
+\date{April 22, 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\input{abstract.tex}
+\end{abstract}
+
+% ── Teaser figure (F4) ──────────────────────────────────────────
+\input{teaser.tex}
+
+% ── Main body (sections 1..12 + appendices A, B) ────────────────
+\input{paper_body.tex}
+
+\end{document}

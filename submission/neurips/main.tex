@@ -1,0 +1,59 @@
+% ─────────────────────────────────────────────────────────────────
+%  Concepts Collapse into Muscles: Domain-Topology-Adaptive PCM
+%  NeurIPS submission version — DOUBLE-BLIND. Anonymous author line
+%  and no back-references to the non-anonymous GitHub repo.
+%
+%  Compile:   latexmk -xelatex main.tex
+%
+%  TO SWAP IN THE OFFICIAL NeurIPS STYLE (once the call opens):
+%    1. Download  neurips_2026.sty  from
+%       https://neurips.cc/Conferences/2026/PaperInformation/StyleFiles
+%    2. Place it in this folder next to main.tex
+%    3. Replace the \documentclass line below with
+%       \documentclass{article}
+%       \usepackage[preprint]{neurips_2026}     % or [final]
+%    4. Remove the geometry + title block below (NeurIPS style sets
+%       these automatically) and keep only:
+%         \title{...}\author{...}\begin{document}\maketitle
+%         \begin{abstract}\input{abstract.tex}\end{abstract}
+%         \input{teaser.tex}\input{paper_body.tex}\end{document}
+%    5. For the submission copy, use \author{Anonymous} as below.
+% ─────────────────────────────────────────────────────────────────
+
+\documentclass[11pt,letterpaper]{article}
+
+\usepackage[margin=1in]{geometry}
+
+\input{preamble_common.tex}
+
+% ── Blind title block ────────────────────────────────────────────
+\title{%
+  \textbf{Concepts Collapse into Muscles:} \\[2pt]
+  \large Domain-Topology-Adaptive Parametric Concept Memory
+}
+\author{Anonymous authors \\ Paper under double-blind review}
+\date{}  % NeurIPS submissions usually omit the date
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\input{abstract.tex}
+\end{abstract}
+
+% ── Teaser figure (F4) ──────────────────────────────────────────
+\input{teaser.tex}
+
+% ── Main body ───────────────────────────────────────────────────
+\input{paper_body.tex}
+
+% Code availability — anonymous link for blind review. Replace the
+% URL below with an anonymous-dot-4open-science mirror of the repo
+% before uploading to OpenReview.
+%
+% \section*{Code availability}
+% Code and a pre-trained ANS encoder for full reproduction are
+% provided anonymously at \url{https://anonymous.4open.science/r/XXXXX}.
+
+\end{document}
