@@ -198,10 +198,10 @@ See `PAPER.md` §2 for full contrasts.
 If you use PCM or these results, please cite:
 
 ```bibtex
-@misc{pcm2026,
+@misc{zhang2026pcm,
   title        = {Concepts Collapse into Muscles: Domain-Topology-Adaptive
                   Parametric Concept Memory},
-  author       = {{Percept PCM authors}},
+  author       = {Zhang, Xugang},
   year         = {2026},
   howpublished = {\url{https://github.com/zxgvfx/parametric-concept-memory}},
   note         = {Framework + 4-domain empirical study; MIT licensed},

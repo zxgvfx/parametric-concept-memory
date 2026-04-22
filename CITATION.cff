@@ -11,8 +11,9 @@ license: MIT
 repository-code: "https://github.com/zxgvfx/parametric-concept-memory"
 url: "https://github.com/zxgvfx/parametric-concept-memory"
 authors:
-  - alias: zxgvfx
-    name: "zxgvfx"
+  - family-names: Zhang
+    given-names: Xugang
+    alias: zxgvfx
 abstract: >-
   A concept memory framework where every ConceptNode in a symbolic
   graph owns a multi-facet parameter bundle, consumed on demand by
@@ -40,8 +41,9 @@ preferred-citation:
   title: "Concepts Collapse into Muscles: Domain-Topology-Adaptive Parametric Concept Memory"
   year: 2026
   authors:
-    - alias: zxgvfx
-      name: "zxgvfx"
+    - family-names: Zhang
+      given-names: Xugang
+      alias: zxgvfx
   # Placeholders — fill in once the preprint / published version exists:
   # doi: "10.5281/zenodo.XXXXXXX"
   # url: "https://arxiv.org/abs/XXXX.XXXXX"
