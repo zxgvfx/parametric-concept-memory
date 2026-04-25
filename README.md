@@ -6,6 +6,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Paper](https://img.shields.io/badge/paper-PAPER.md-brightgreen.svg)](./PAPER.md)
 
+**Language**: English | [简体中文](./README.zh-CN.md)
+
 > *Concepts Collapse into Muscles — Domain-Topology-Adaptive Parametric
 > Concept Memory.*
 > Code and full paper for the four-domain PCM study.
