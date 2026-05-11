@@ -117,11 +117,26 @@ class _CollapseMixin:
                     f"requested {shape}"
                 )
             pool = self.bundle_pool[facet]
-            if device is not None and pool.device != torch.device(device):
-                # Move whole pool (rare; e.g. CPU -> CUDA after construction).
-                self.bundle_pool[facet] = nn.Parameter(
-                    pool.data.to(device), requires_grad=pool.requires_grad
+            if device is not None:
+                target = torch.device(device)
+                # Compare device *type* + *index* but treat
+                # ``device('cuda')`` (no index) as matching
+                # ``device('cuda', 0)`` so callers passing the
+                # string "cuda" don't trigger a Parameter rebuild
+                # on every collapse — that silently broke v2 MVP
+                # training (see PCM_V2_DUAL_CHANNEL_DESIGN §V2
+                # debug log) because optimizer references became
+                # stale after each rebuild.
+                same_type = pool.device.type == target.type
+                idx_match = (
+                    target.index is None
+                    or pool.device.index == target.index
                 )
+                if not (same_type and idx_match):
+                    self.bundle_pool[facet] = nn.Parameter(
+                        pool.data.to(device),
+                        requires_grad=pool.requires_grad,
+                    )
             return self.bundle_pool[facet]
 
         pool_device = torch.device(device) if device is not None else torch.device("cpu")
