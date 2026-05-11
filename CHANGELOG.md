@@ -241,6 +241,47 @@ and the [Keep a Changelog](https://keepachangelog.com/) conventions.
     *PNAS*). PCM's "centroid present, head untrained →
     holdout = 0" mirrors "cone responses present, language
     label absent → categorical access blocked".
+- **PAPER §6.9 phoneme cross-language transfer** (third
+  domain in the three-causal-layer protocol; reveals a
+  qualitative dominant-layer switch). New
+  `experiments/phoneme_transfer_priors.py`
+  (`make_articulator_centroids`, `zipf_phonotactic_weights`,
+  `MinimalPairHead`), upgraded
+  `experiments/phoneme_concept_study/train.py` with
+  `source_indices`, `centroid_init`,
+  `enable_minimal_pair_head` kwargs, harness
+  `experiments/sleep_phoneme_transfer.py`, figure
+  `experiments/render_paper_figures/F15_phoneme_transfer.py`.
+  Setup: 20-phoneme inventory split into 13-source / 7-target
+  per seed; V/M/P heads see only source; target accuracy on
+  V (chance 0.5) / M (chance 0.25) / P (chance 0.25) is the
+  transfer indicator. 5-condition × 5-seed result:
+  - **A baseline** target acc = 0.514 / 0.114 / 0.257
+    (chance or below — V/M/P heads' systematic OOD bias).
+  - **B articulator centroid alone** target acc = **1.000 /
+    0.943 / 0.771** — the strongest single-layer transfer
+    signal observed in any PCM domain so far.
+  - **D minimal-pair head alone** transfers only the facet
+    it consumes (default voice_bias): tgt_V = 1.000, M/P
+    stay at chance.
+  - **Phoneme is B-dominant**, in contrast with colour and
+    number which are D-dominant. PCM thus reveals a
+    *task-symmetry × dominant-layer* prediction principle:
+    cyclic / translational task groups need D to break
+    symmetry; orthogonal-categorical task groups let B
+    transfer cleanly on its own. This matches Werker & Tees
+    1984 *Infant Behav Dev* on infant universal phonetic
+    discrimination — articulator anatomy supplies axis
+    geometry from birth, no foraging-style task pressure
+    required.
+- **Cross-domain dominant-layer table** now spans three
+  qualitatively different domains:
+  - colour mixing (Z₁₂ cyclic): D dominant
+  - number arithmetic (ℤ translational): D dominant
+  - phoneme V/M/P (orthogonal categorical): B dominant
+  Together with the §7.5 / §7.5-color extrapolation ceilings,
+  this gives the falsifiable testbed claim its strongest
+  triple-domain support.
 
 ### Authority — extended
 Above plus VQ-VAE / continual-learning literature mapped to the

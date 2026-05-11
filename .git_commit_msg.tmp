@@ -1,0 +1,90 @@
+Add phoneme cross-language transfer (third domain) and full English PAPER
+
+This commit lands two complementary deliverables:
+
+1. PAPER section 6.9 phoneme cross-language transfer
+   --------------------------------------------------
+   Third-domain instantiation of the section 6.8 / 7.4 three-layer
+   causal-ablation protocol, this time on the 20-phoneme inventory
+   with a 13-source / 7-target split. V/M/P heads only see source-
+   language phonemes; target accuracy on V (chance 0.5) / M (chance
+   0.25) / P (chance 0.25) measures whether bundle representations
+   transfer across the held-out language.
+
+   New code:
+   - experiments/phoneme_transfer_priors.py: make_articulator_centroids
+     (voice/manner/place cone bases), zipf_phonotactic_weights,
+     source_natural_weights, MinimalPairHead (pair-input 4-class
+     same / voice-diff / manner-diff / place-diff classifier).
+   - phoneme train_one upgraded with source_indices, sample_weight,
+     centroid_init, enable_minimal_pair_head kwargs; reports per-axis
+     accs_source and accs_target separately.
+   - experiments/sleep_phoneme_transfer.py: 5-condition x 5-seed
+     ablation harness.
+   - experiments/render_paper_figures/F15_phoneme_transfer.py:
+     three-panel (V/M/P) bar chart with chance lines.
+
+   5 conditions x 5 seeds = 25 runs, n_target = 7, epochs = 40.
+   Target-language accuracy:
+
+   - A baseline:    V = 0.514 +/- 0.128, M = 0.114 +/- 0.064, P = 0.257 +/- 0.120
+                    (at or below chance; head's systematic OOD bias)
+   - B articulator: V = 1.000 +/- 0.000, M = 0.943 +/- 0.078, P = 0.771 +/- 0.078
+                    (strongest single-layer transfer signal in any PCM domain)
+   - C zipfsource:  V = 0.486 +/- 0.078, M = 0.343 +/- 0.078, P = 0.171 +/- 0.120
+   - D minpair:     V = 1.000 +/- 0.000, M = 0.257 +/- 0.186, P = 0.229 +/- 0.163
+                    (transfers only the consumed facet -- voice_bias)
+   - B+C+D:         V = 0.971 +/- 0.064, M = 0.771 +/- 0.128, P = 0.714 +/- 0.175
+
+   Key finding: phoneme is **B-dominant**, the *opposite* of the
+   colour and number domains where D was dominant. This is exactly
+   what PCM's task-symmetry x dominant-layer principle predicts:
+
+   - colour mix task has Z_12 cyclic symmetry -> D required
+   - number arithmetic has Z translational symmetry -> D required
+   - phoneme V/M/P axes are categorical and orthogonal -> task
+     symmetry trivial -> B alone suffices
+
+   Aligns with Werker & Tees 1984 *Infant Behav Dev* on infant
+   universal phonetic discrimination: articulator-grounded prior
+   supplies axis geometry from birth, no foraging-style task
+   pressure required.
+
+2. PAPER.md complete English rewrite
+   ----------------------------------
+   PAPER.md now contains English versions of every section that was
+   previously only in PAPER.zh-CN.md:
+
+   - section 6.6 Tier-G Sleep Abstraction (full G1-G7 invariants,
+     four failure-mode literature mapping, Pareto-better config,
+     four-domain safety table).
+   - section 6.7 Sleep does not invent perceptual primitives
+     (24-seed colour-ring rotation analysis, RYB 0/24 falsification).
+   - section 6.8 Three-causal-layer recovery of perceptual primitives
+     (5 condition x 8 seed colour ablation; D drives red-wedge
+     anchor 0.62 -> 1.00).
+   - section 6.9 Phoneme cross-language transfer (this commit).
+   - section 7.4 Three-layer reverses base-10 negative
+     (5 condition x 8 seed; D lifts spike_10 from +0.290 to +0.667;
+     BCD reaches purity 0.876).
+   - section 7.5 Length extrapolation architectural ceiling
+     (5 condition x 5 seed; A/B/C at chance, D/BCD +1.1 pp).
+   - section 7.5-color Hue holdout closed-output-set ceiling
+     (5 condition x 5 seed = 25 runs all strictly 0.000).
+
+   PAPER.md now totals ~12,600 words, 1,663 lines; PAPER.zh-CN.md
+   remains the canonical Chinese version at 943 lines. All figure
+   references (F9 / F11 / F12 / F13 / F14 / F15) are present in
+   both. Translation is technical-paper-grade English; SHORT_REPORT_EN.md
+   already provided the editorial-grade short-form version of the
+   same material.
+
+3. Other updates
+   --------------
+   - SHORT_REPORT_EN.md highlights expanded with the phoneme
+     B-dominant finding and Werker & Tees 1984 reference.
+   - CHANGELOG.md section 6.9 entry added; cross-domain
+     dominant-layer table summarising the three domains.
+
+Tests: 63/63 unit tests pass; zero regression in Tier-A/B/C/D
+bit-identity and Tier-G G1-G7 invariants.

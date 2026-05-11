@@ -61,6 +61,12 @@ def train_one(
     sleep_assignment: str = "hard",
     sleep_soft_tau: float = 0.5,
     use_abstract: bool = False,
+    # §6.9 cross-language transfer hooks
+    source_indices: list[int] | None = None,  # phonemes seen by V/M/P heads
+    sample_weight: list[float] | None = None,  # per-phoneme sampling weight (over source)
+    centroid_init: dict[str, torch.Tensor] | None = None,  # facet → (N_PH, dim) tensor for B layer init
+    enable_minimal_pair_head: bool = False,  # D layer: pair-input head sees full inventory
+    minimal_pair_facet: str = "voice_bias",  # which facet the pair head consumes
 ) -> dict:
     torch.manual_seed(seed)
     rng = random.Random(seed)
@@ -79,6 +85,21 @@ def train_one(
     if mode in ("single_p", "triple"):
         heads["p"] = build_place_head(**head_kw).to(DEVICE)
 
+    # D layer: minimal-pair head trained on full inventory pairs.
+    pair_head = None
+    if enable_minimal_pair_head:
+        from experiments.phoneme_transfer_priors import (
+            MinimalPairHead,
+            minimal_pair_label,
+        )
+        pair_facet_dim = {
+            FACET_V: VOICE_DIM, FACET_M: MANNER_DIM, FACET_P: PLACE_DIM,
+        }[minimal_pair_facet]
+        pair_head = MinimalPairHead(
+            facet=minimal_pair_facet, facet_dim=pair_facet_dim,
+            **head_kw,
+        ).to(DEVICE)
+
     # lazy-init facets by calling collapse once per phoneme per active head
     with torch.no_grad():
         for i in range(N_PH):
@@ -94,11 +115,42 @@ def train_one(
                             tick=0, device=DEVICE, init="normal_small")
     cg.bundles_to(torch.device(DEVICE))
 
+    # B layer: overwrite bundle rows with provided centroid init (per facet).
+    if centroid_init is not None:
+        with torch.no_grad():
+            for facet, rows in centroid_init.items():
+                if facet not in cg.bundle_pool:
+                    continue
+                pool = cg.bundle_pool[facet]
+                rows_dev = rows.to(pool.device)
+                if rows_dev.shape[0] != N_PH:
+                    raise ValueError(
+                        f"centroid_init[{facet!r}] must have N_PH={N_PH} rows, "
+                        f"got {rows_dev.shape[0]}"
+                    )
+                # bundle_pool is dim-trimmed by the facet shape;
+                # truncate centroid_init last-dim if necessary.
+                target_dim = pool.shape[-1]
+                rows_trim = rows_dev[..., :target_dim]
+                for i in range(N_PH):
+                    slot = cg.cid_to_slot[cid_of(i)]
+                    pool.data[slot] = rows_trim[i]
+
     params: list = []
     for h in heads.values():
         params += list(h.parameters())
+    if pair_head is not None:
+        params += list(pair_head.parameters())
     params += list(cg.iter_bundle_parameters())
     opt = torch.optim.AdamW(params, lr=LR, weight_decay=1e-4)
+
+    # Source-language phoneme pool for V/M/P training. Default = full inventory.
+    src_idx = list(source_indices) if source_indices is not None else list(range(N_PH))
+    if sample_weight is not None and len(sample_weight) != len(src_idx):
+        raise ValueError(
+            f"sample_weight length ({len(sample_weight)}) must match "
+            f"source_indices length ({len(src_idx)})"
+        )
 
     facet_by_key = {"v": FACET_V, "m": FACET_M, "p": FACET_P}
     sleep_facets = [facet_by_key[k] for k in heads]
@@ -109,8 +161,17 @@ def train_one(
     for epoch in range(1, epochs + 1):
         for h in heads.values():
             h.train()
+        if pair_head is not None:
+            pair_head.train()
         for step_i in range(steps_per_epoch):
-            idx_batch = [rng.randrange(N_PH) for _ in range(BATCH_SIZE)]
+            # V/M/P heads: sample only over the source-language subset.
+            if sample_weight is not None:
+                idx_batch = rng.choices(
+                    src_idx, weights=sample_weight, k=BATCH_SIZE,
+                )
+            else:
+                idx_batch = [src_idx[rng.randrange(len(src_idx))]
+                             for _ in range(BATCH_SIZE)]
             ids = _apply_shuffle([cid_of(i) for i in idx_batch], shuffle_map)
 
             total = 0.0
@@ -133,6 +194,30 @@ def train_one(
                 )
                 logits = heads["p"](ids, cg, tick=epoch * 10000 + step_i)
                 total = total + F.cross_entropy(logits, tgt); count += 1
+
+            # D layer: minimal-pair head trains on FULL inventory pairs
+            # (source + target), exposing target bundle rows to
+            # axis-relevant gradient via a same/diff-axis classifier.
+            if pair_head is not None:
+                from experiments.phoneme_transfer_priors import (
+                    minimal_pair_label,
+                )
+                # Each pair: sample two random indices over full inventory.
+                pa = [rng.randrange(N_PH) for _ in range(BATCH_SIZE)]
+                pb = [rng.randrange(N_PH) for _ in range(BATCH_SIZE)]
+                ids_a = _apply_shuffle(
+                    [cid_of(i) for i in pa], shuffle_map)
+                ids_b = _apply_shuffle(
+                    [cid_of(i) for i in pb], shuffle_map)
+                pair_tgt = torch.tensor(
+                    [minimal_pair_label(feat_of(a), feat_of(b))
+                     for a, b in zip(pa, pb)],
+                    device=DEVICE,
+                )
+                pair_logits = pair_head(
+                    ids_a, ids_b, cg, tick=epoch * 10000 + step_i,
+                )
+                total = total + F.cross_entropy(pair_logits, pair_tgt)
 
             opt.zero_grad(); total.backward(); opt.step()
 
@@ -159,15 +244,39 @@ def train_one(
 
     for h in heads.values():
         h.eval()
+    if pair_head is not None:
+        pair_head.eval()
+
+    src_set = set(src_idx)
+    tgt_idx = [i for i in range(N_PH) if i not in src_set]
 
     accs: dict[str, float] = {}
+    accs_source: dict[str, float] = {}
+    accs_target: dict[str, float] = {}
     with torch.no_grad():
         all_ids = _apply_shuffle([cid_of(i) for i in range(N_PH)], shuffle_map)
         for key, h in heads.items():
             logits = h(all_ids, cg)
             axis = {"v": 0, "m": 1, "p": 2}[key]
-            tgt = torch.tensor([feat_of(i)[axis] for i in range(N_PH)], device=DEVICE)
-            accs[key] = float(logits.argmax(-1).eq(tgt).sum().item()) / N_PH
+            preds = logits.argmax(-1)
+            full_tgt = torch.tensor(
+                [feat_of(i)[axis] for i in range(N_PH)], device=DEVICE,
+            )
+            accs[key] = float(preds.eq(full_tgt).sum().item()) / N_PH
+            if src_idx:
+                src_mask = torch.tensor(
+                    [i in src_set for i in range(N_PH)], device=DEVICE,
+                )
+                accs_source[key] = float(
+                    preds[src_mask].eq(full_tgt[src_mask]).sum().item()
+                ) / max(int(src_mask.sum().item()), 1)
+            if tgt_idx:
+                tgt_mask = torch.tensor(
+                    [i not in src_set for i in range(N_PH)], device=DEVICE,
+                )
+                accs_target[key] = float(
+                    preds[tgt_mask].eq(full_tgt[tgt_mask]).sum().item()
+                ) / max(int(tgt_mask.sum().item()), 1)
 
     bundle_state = {
         cid: {k: v.detach().cpu() for k, v in c.bundle.state_dict().items()}
@@ -182,6 +291,10 @@ def train_one(
         "mode": mode, "seed": seed,
         "shuffled": shuffle_map is not None,
         "accs": accs,
+        "accs_source": accs_source,
+        "accs_target": accs_target,
+        "n_source": len(src_idx),
+        "n_target": len(tgt_idx),
         "bundle_state": bundle_state,
         "sleep_reports": sleep_reports,
     }

@@ -547,6 +547,66 @@ PCM 的 Tier-G 因此**不声称** sleep 普世改善 PCM；它声称：(i) 严�
 
 ![F11 §6.8 三层因果 ablation：左 = 监督几何打破对称（EQUI），右 = 任务驱动打破对称（red-wedge anchor）](./docs/figures/F11_color_primaries.png)
 
+### 6.9 第三个领域 — 音素跨语言迁移与 dominant-layer 切换
+
+§6.8 颜色与 §7.4 数字两个领域上 task-driven 层（D）都是最强的对称性破坏力。但 §6.7 也声明过：「PCM 反映的是 task 的对称群加上注入的非对称先验」。如果一个 domain 的任务**自身就是 orthogonal categorical**（任务的对称群本身就是 trivial 的），那 D 层就不该 dominant——硬件先验（B）应该 dominant。我们在 phoneme 域上做了这个 falsifiable test。
+
+**Cross-language transfer setup**（脚本：`experiments/sleep_phoneme_transfer.py`）。N=20 phoneme 全集，按 seed-shuffle 划分为：
+
+- **Source language**：13 个 phoneme，参与 V/M/P heads 的训练（per-axis classification）
+- **Target language**：剩余 7 个 phoneme，**完全不在 V/M/P 训练 batch 中**——它们的 bundle row 仅通过先验层接收 gradient
+
+测试：target language 的 V/M/P 准确率（chance 分别为 0.5 / 0.25 / 0.25）。这镜像了 [Werker & Tees 1984 *Infant Behav Dev*] 中婴儿在母语外 phoneme 对比上的 universal-discrimination 阶段：bundle 表征的轴对齐能否跨非训练 phoneme 转移？
+
+**三层因果操作化**（与 §6.8 / §7.4 平行）：
+
+| 层 | phoneme 域操作化 |
+|---|---|
+| **B 硬件先验** | `make_articulator_centroids`：voice / manner / place 三组 cone basis（共 2 + 4 + 4 = 10 个正交方向），每个 phoneme 的 centroid 是其 (v, m, p) 三个 cone 的加权和 |
+| **C 生态统计** | `zipf_phonotactic_weights`：source phoneme 按 1/rank 采样，模拟自然语言里某些音素出现频率 dramatic 高于其他（[Maddieson 1984 / PHOIBLE]） |
+| **D 任务驱动** | `MinimalPairHead`：pair-input 4-class head，输入两个 phoneme 输出 `same / voice-diff / manner-diff / place-diff`。训 full inventory pairs（含 source + target），让 target bundle row 通过 minimal-pair signal 接收 axis-relevant 梯度，但**永不暴露 target 的 per-axis ground-truth label** |
+
+**5 condition × 5 seed 结果**（n_target=7, epochs=40, steps=120/epoch）：
+
+| 条件 | target V acc ± std | target M acc ± std | target P acc ± std |
+|---|---|---|---|
+| **A** baseline | 0.514 ± 0.128 | 0.114 ± 0.064 | 0.257 ± 0.120 |
+| **B** + articulator centroid | **1.000 ± 0.000** | **0.943 ± 0.078** | **0.771 ± 0.078** |
+| **C** + Zipf source sampling | 0.486 ± 0.078 | 0.343 ± 0.078 | 0.171 ± 0.120 |
+| **D** + minimal-pair head | **1.000 ± 0.000** | 0.257 ± 0.186 | 0.229 ± 0.163 |
+| **B+C+D** combined | 0.971 ± 0.064 | 0.771 ± 0.128 | 0.714 ± 0.175 |
+
+所有条件 source acc = 1.000 ± 0.000（V/M/P 都到 ceiling）；上表只列 target acc。
+
+**四个核心观察**：
+
+1. **A baseline target 远低于 chance**。target M acc = 0.114 < chance 0.25，target P acc = 0.257 ≈ chance。这说明 V/M/P heads 在 source 上完美训练后，**对 target phoneme 的输出反而是带 systematic bias 的随机猜测**——head 学到的 axis class 与 source 输入相关，对 target 的 random bundle row 输出甚至比 chance 更差。这与 §7.5 数字 length-OOD 的 chance-level 行为一致（input-side ceiling）。
+
+2. **B alone (articulator centroid) 几乎完美 transfer**：tgt_V = 1.000, tgt_M = 0.943, tgt_P = 0.771。**这是迄今最强的 single-layer transfer 信号**——大幅强于 §6.8 / §7.4 中 B 单独贡献。三个 axis 上 transfer 强度 V > M > P 也清晰：voice 是 binary（最简单），place 是 4-way（最难）。
+
+3. **D alone 只 transfer voice axis，manner/place 留在 chance**。tgt_V = 1.000 因为 `MinimalPairHead` 默认消费 voice_bias facet——pair 信号只流向 voice 轴；M/P 没相应 head 消费 manner_bias / place_bias。这给出 D 的精确机制：minimal-pair signal **只 transfer 它消费的 facet 上的 axis**，不会跨 facet 泛化。
+
+4. **phoneme 域是 B-dominant, 与 colour/number 的 D-dominant 完全相反**。这不是 PCM 的不一致，恰恰是 PCM 的 falsifiable predictability：
+   - colour `mix` 任务对 hue 圆环 cyclic-equivariant → task 对称群 = Z₁₂ → D 必须 break symmetry
+   - number `+/-/*//` 任务对线性平移近似 equivariant → task 对称群 ≈ ℤ → D 必须 break symmetry
+   - phoneme V/M/P 任务对三个 categorical 轴 *已经* orthogonal → task 对称群 trivial → 仅需 B 注入 axis-aligned geometry
+
+**对 §6.7 / §6.8 / §7.4 的统一**：
+
+| domain | task 对称群 | dominant layer | B 单独 transfer | D 单独 transfer |
+|---|---|---|---|---|
+| colour mixing | Z₁₂ cyclic | **D** (ripe head) | EQUI 4/8（弱）| red-wedge 1.00 |
+| number arith | ℤ linear | **D** (last-digit head) | spike_10 +0.07 | spike_10 +0.38 |
+| **phoneme V/M/P** | **trivial (orthogonal axes)** | **B (articulator centroid)** | **V=1.0, M=0.94** | V=1.0 (其他 chance) |
+
+这给 PCM 一个**精确的预测原则**：
+
+> **dominant causal layer 由 task 对称群的复杂度决定**——任务对称群越强（cyclic / translational），越需要 task-driven asymmetry (D) 打破对称；任务对称群越弱（orthogonal categorical），硬件先验 (B) 自然占主导。
+
+**与人脑认知科学的对应**：人脑的颜色 categorical perception 需要 V4 hue-selective neuron 通过觅食压力训练（D 主导），数字的 base-10 column 需要学校教育（D 主导），而 phoneme features 直接由 articulator 解剖学决定（口腔肌肉位置→ place axis；声带振动 → voice axis；鼻音 vs 非鼻音 → manner axis）——人类婴儿 6 月内对所有 phonetic 对比都能 discriminate（[Werker & Tees 1984]），正是因为 articulator-grounded prior 已经在出生时就提供了 axis-aligned 的几何，无需后续 task pressure 来 carve out feature axes.
+
+![F15 §6.9 phoneme cross-language transfer：5 conditions × 5 seeds × {V, M, P} target axes; B 单独 dominant, V=1.000, M=0.943, P=0.771](./docs/figures/F15_phoneme_transfer.png)
+
 ---
 
 ## 7 实验 4 — 纯 Base-10 涌现（负结果）

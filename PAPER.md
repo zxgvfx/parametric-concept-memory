@@ -687,6 +687,365 @@ per-seed data: `SPACE_CONCEPT_STUDY.md`, `PHONEME_CONCEPT_STUDY.md`.
 
 ![F8 Space grid MDS: trained vs shuffled-identity counterfactual](./docs/figures/F8_space_mds_trained_vs_shuffle.png)
 
+### 6.6  Tier-G — Sleep Abstraction
+
+The geometries in §4–§6 emerge entirely under wake-time SGD. A natural
+follow-up: once training is complete, can we *offline* reorganise the
+same `bundle_pool` into a "prototype + per-row residual" form without
+breaking downstream performance? This is precisely the function that
+cognitive neuroscience attributes to systems consolidation
+(Klinzing et al. 2019 *Nat Neurosci*; Sun et al. 2023 *Nat Neurosci*).
+
+We implement a **falsifiable** sleep pass (`pcm.sleep`):
+
+1. **Phase A — snapshot**: copy active rows from each facet pool under
+   `torch.no_grad`.
+2. **Phase B — k-means**: cosine k-means produces *k* centroids.
+3. **Phase C — register**: each cluster becomes an `abstract_prototype`
+   node; per-row residual = (row − centroid) goes into a sibling
+   `<facet>_residual` pool; per-(anchor, member) cookable subgraph
+   `concept.relation_apply(@anchor, @residual, "add")` is registered.
+4. **Phase E — replay** (optional): a ring-buffered replay loop with
+   hard gradient masking on prototype slots and residual facets.
+
+We formalise seven invariants and unit-test them in
+`tests/test_tier_g_sleep.py`:
+
+| ID | Invariant |
+|---|---|
+| **G1** | bit-identical forward when `attach_sleep` is not called |
+| **G2** | active rows byte-identical under `replay_steps=0` |
+| **G3** | ρ_linear regression on §4 N=7 ≤ 0.05 absolute |
+| **G4** | each cluster's anchor is exactly the mean of its members |
+| **G5** | `cook(rel) ≈ original row` (max abs error < 1e-5) |
+| **G6** | second `run_sleep_pass` is a no-op under `force_recluster=False` |
+| **G7** | post-sleep `collapse_via_abstract` numerically equal to `collapse_batch` |
+
+G7 was added after V3 ablation revealed its necessity. All seven hold
+in 63/63 unit tests.
+
+**Functional consumption of abstract relations**. With phase A–C alone
+the forward path is unchanged — sleep is a read-only snapshot. The
+helper `collapse_with_optional_abstract` lets any head, when
+`use_abstract=True`, read each member as `anchor + residual`, routing
+gradient simultaneously through the shared prototype slot and the
+per-member residual. This is the step that turns Tier-G from an
+archive into a *functional schema* while preserving G1–G7.
+
+#### 6.6.1  Failure modes mapped to the literature
+
+On quad N=30, an early implementation of the C path (sleep + abstract
+read) collapsed catastrophically (ρ_log std = 0.268, 50× the baseline
+σ). We mapped the four observed symptoms onto well-known causes in
+the recent VQ-VAE / continual-learning / MoE literature:
+
+| Symptom | Literature label | Fix |
+|---|---|---|
+| `force_recluster=True` σ = 0.268 | VQ-VAE *codebook collapse / topology hop* (Zheng et al. ICCV 2023) | EMA anchor blend (`anchor_ema < 1`) |
+| OOD ↓ 5 % | k-clusters too coarse → information bottleneck (VQGAN-LC, NeurIPS 2024) | k ≈ N |
+| anchor frozen at first sleep | *loss of plasticity* (Sutton et al. *Nature* 2024) | repeated sleep + EMA |
+| non-selected anchor starves | MoE *expert starvation* (SparseMixer, ICLR 2024) | soft assignment (softmax over all anchors) |
+
+The three `SleepConfig` knobs `anchor_ema / assignment / soft_tau`
+implement these fixes directly.
+
+#### 6.6.2  Pareto-better configuration on the quad domain
+
+Fixed configuration: `k = N − 2 = 28`, `assignment="soft"`, `τ = 0.1`,
+`sleep_warmup = 12`, `sleep_every = 4`, 5 seeds.
+
+| Setting | A ρ_log | C ρ_log | Δρ | A train / OOD | C train / OOD | ΔOOD |
+|---|---|---|---|---|---|---|
+| OOD 0.15 (well-trained) | +0.774 ± 0.013 | +0.780 ± 0.022 | **+0.006** | 0.954 / 0.636 | 0.952 / 0.643 | **+0.007** |
+| **OOD 0.30 (non-saturated)** | **+0.775 ± 0.035** | **+0.780 ± 0.038** | **+0.004** | **0.926 / 0.523** | **0.925 / 0.541** | **+0.018** |
+| OOD 0.50 (too hard) | +0.699 ± 0.065 | +0.694 ± 0.061 | −0.006 | — / 0.240 | — / 0.243 | +0.003 |
+
+OOD 0.30 gives the cleanest signal: 4 of 5 seeds with strict
+ΔOOD > 0, mean +0.018 (OOD baseline 0.523). This matches Sun et al.
+(2023, *Nat Neurosci*) "memories consolidate when doing so aids
+generalisation": sleep benefit peaks in the medium-difficulty regime
+and is suppressed both at saturation and at chance-floor difficulty.
+
+#### 6.6.3  Cross-domain safety (5 seeds × 4 domains)
+
+| domain | A train ± std | C train ± std | Δtrain | Δρ | ΔOOD |
+|---|---|---|---|---|---|
+| number | 0.926 ± 0.018 | 0.925 ± 0.016 | −0.001 | **+0.004** | **+0.018** ✅ |
+| colour | 1.000 ± 0.000 | 1.000 ± 0.000 | 0.000 | +0.001 | −0.033 |
+| space  | 1.000 ± 0.000 | 1.000 ± 0.000 | 0.000 | +0.015 | −0.032 |
+| phoneme| 1.000 ± 0.000 | 1.000 ± 0.000 | 0.000 | +0.003 | (N/A) |
+
+**Two paper-grade claims**:
+
+1. **Tier-G is safe across all 4 domains**: max Δacc = −0.002 (within
+   1 σ); G1–G7 all green in 63/63 unit tests after the EMA + soft
+   routing + warmup fixes.
+2. **OOD-Pareto-better on task-difficulty-matched non-saturated
+   domains**: number domain at OOD 0.30 gives ΔOOD = +0.018, Δρ =
+   +0.004 with 4-of-5 seeds in the same direction. Colour / space
+   OOD baselines are already low (0.61 / 0.18); their `mixing` /
+   `motion` tasks are *not* inductive-generalisation benchmarks and
+   the OOD held-out partition mostly tests memorisation. This
+   limitation is task design, not the sleep algorithm.
+
+A noteworthy second-order observation: **colour ρ-std collapses to
+38 % of baseline** (A std = 0.008, C std = 0.003), aligning with
+Klinzing et al.'s "consolidation reduces representational variance".
+
+Tier-G therefore **does not** claim to universally improve PCM. It
+claims (i) strict G1–G7 safety; (ii) 5-seed double-positive in the
+task-difficulty-matched non-saturated regime; (iii) all known
+failure modes precisely literature-mappable, with corresponding
+fixes already implemented. This makes sleep abstraction a tunable,
+falsifiable, literature-aligned subsystem rather than a hand-wave.
+
+### 6.7  Sleep does *not* invent perceptual primitives (negative)
+
+§7 below tests whether wake-time SGD spontaneously emerges human
+base-10 numerical structure (it does not). A symmetric question
+applies to sleep: on the 12-hue colour domain, when we run sleep
+abstraction with various *k*, do the *k* anchors recover canonical
+human visual-system primaries (RGB / CMY / RYB / CMYK / warm-cool)?
+
+**Two competing hypotheses**:
+
+* **H_perceptual** — sleep's codebook compression spontaneously
+  recovers a colour-vision-like prior (RGB at hues {0, 4, 8} for
+  k=3, CMYK at {0, 3, 6, 9} for k=4). Would suggest PCM has snuck
+  in a colour-vision bias somewhere.
+* **H_taskSym** — sleep is purely cyclic-equivariant: anchors land
+  on *k* equidistant hues 360°/k apart, but the rotational offset
+  is determined entirely by the seed; cross-seed the offset
+  distribution should be roughly uniform over the *k* rotation
+  classes. Any apparent "perceptual prior hit" is just "strict
+  equidistance + that rotation class happened to coincide with the
+  named constant".
+
+We ran `experiments/sleep_inspect_color_anchors.py` for
+*k* ∈ {3, 4, 6}, 8 seeds each (24 total). For each seed we record
+the anchor's nearest hue index, the spacings, equidistance, and
+rotation-aware match against the five named priors.
+
+| *k* | strict-equidistant seeds | RGB hits | CMY hits | RYB hits | CMYK hits | WarmCool6 hits |
+|---|---|---|---|---|---|---|
+| 3 | 2 / 8 (rot. class 3) | 2 / 8 | 2 / 8 | **0 / 8** | — | — |
+| 4 | 1 / 8 (rot. class 0) | — | — | — | 1 / 8 | — |
+| 6 | 1 / 8 (rot. class 1) | — | — | — | — | 1 / 8 |
+
+**Three observations**:
+
+1. **Each non-trivial prior's hit count exactly equals the
+   strict-equidistant seed count.** "PCM recovers RGB" turns out to
+   be just "this seed happens to be strictly 120° equidistant *and*
+   in rotation class 0 (mod 4)" — no prior beats the
+   strict-equidistant rate.
+2. **The only non-equidistant prior probed (RYB = {0, 2, 8},
+   spacings = [2, 4, 6]) gets 0 / 24 hits across all *k*.** If PCM
+   had any colour-vision prior, painter primaries (RYB) should
+   appear at least occasionally. They do not.
+3. **6 of 8 (k=3), 7 of 8 (k=4), 7 of 8 (k=6) seeds are not
+   strictly equidistant** (max hue deviation ≤ 1–2). This is a
+   numerical artefact of running cosine k-means in 64-dim bundle
+   space rather than on a strict 12-mod angular coordinate, and is
+   unrelated to perceptual prior structure.
+
+This mirrors the §7 base-10 negative exactly:
+
+| Experiment | Phase | Tested for | Indicator | Result |
+|---|---|---|---|---|
+| §7 Base-10 | wake-time SGD | base-10 factorisation | spike_10 / column-MLP probe | **does not emerge** |
+| §6.7 Colour primaries | sleep abstraction pass | visual-system primaries | prior hit rate vs equidistant baseline | **does not emerge** |
+
+**Joint claim**: PCM does not introduce *any* human-perceptual
+prior that is not already in the task. It only amplifies the
+symmetries the task algebra grants. When the task is rotation-
+equivariant on a hue ring (cyclic mixing), sleep abstraction
+returns *some* equidistant representative of that rotation group —
+not a particular one with any physical meaning.
+
+### 6.8  Recovering perceptual primitives requires biological priors or ecological pressure
+
+§6.7 attributes non-emergence of RGB to PCM's lack of the three
+causal layers that the trichromacy literature attributes to human
+colour primaries. This section tests the converse: when we *do*
+inject those layers one by one, does sleep start recovering
+RGB-aligned anchors?
+
+The three causal layers (Stockman & Sharpe 2000; Jacobs 2009;
+Conway et al. 2007; Berlin & Kay 1969):
+
+| Layer | Role in human trichromacy | PCM operationalisation |
+|---|---|---|
+| **1 Hardware** | three cone opsins (L/M/S) | `make_lms_like_centroids`: 3 orthogonal cone basis vectors × per-hue cosine response peaked at hue 0 / 4 / 8 |
+| **2 Statistics** | natural chromatic statistics + foraging | `mix_sample_weight = green_peak` (×4 sampling boost on hues near 4) |
+| **3 Task** | red/green discrimination → ripe-fruit foraging | `RipeFruitHead`: binary head, ripe = hue ∈ {0, 1, 11} |
+
+**5-condition × 8-seed ablation** (k = 3 sleep, warmup = 15,
+every = 5, script `experiments/sleep_color_primaries.py`):
+
+| Condition | strict-EQUI | RGB hit | red-wedge anchor |
+|---|---|---|---|
+| **A** baseline (random centroid + uniform + no ripe head) | 2 / 8 | 2 / 8 | 0.62 |
+| **B** + LMS centroid | **4 / 8** | **4 / 8** | 0.75 |
+| **C** + green-peak sampling | 3 / 8 | 3 / 8 | 0.75 |
+| **D** + ripe-fruit head | 3 / 8 | 3 / 8 | **1.00** |
+| **B+C+D** combined | **4 / 8** | **4 / 8** | **1.00** |
+
+"Red-wedge anchor" = at least one of the three anchors falls on
+hue ∈ {0, 1, 11}.
+
+**Three core observations**:
+
+1. **The task-driven layer (D) is the strongest cyclic-symmetry
+   breaker**. A single binary ripe-fruit head pushes the red-wedge
+   rate from 0.62 to 8 / 8 = 1.00: every seed has at least one
+   anchor in the red region. This matches Jacobs (2009)'s account
+   that red/green discrimination, driven by ripe-fruit and tender-
+   leaf detection, was the selective pressure that forced L/M cone
+   divergence in primates — task asymmetry is the *causal* force
+   that pushes a perceptual system from a symmetric distribution
+   onto categorical primaries.
+
+2. **The biological prior (B) alone is insufficient**. LMS
+   centroids lift strict-equidistance from 2 / 8 to 4 / 8 (+50 %),
+   but the rotation class still varies seed-by-seed (rot. class
+   {3 : 3, 0 : 1}). Reason: the cyclic equivariance of the mixing
+   task is a strong symmetry force that re-uniformises hue rows
+   during gradient descent, partly erasing the centroid-level LMS
+   bias. Consistent with Conway et al. 2007's V4 hue-selective-
+   neuron data: cone-level prior only fixes sampling; categorical
+   selection happens task-side.
+
+3. **B + C + D yields the only condition with simultaneous strict
+   equidistance and rotation fixation**: EQUI = 4 / 8 + red-wedge
+   = 1.00. This recapitulates, in toy form, the multi-causal
+   account of trichromacy that no single-layer story has been
+   able to displace empirically.
+
+**Joint claim with §6.7**:
+
+| Section | Test | Result |
+|---|---|---|
+| §6.7 | pure task symmetry, no priors | RGB **does not** emerge (H_perceptual refuted) |
+| §6.8 | three causal layers injected | RGB-aligned anchor **can be driven**, strength D ≫ B > C |
+
+This is more than an ablation. It is a computational-cognitive-
+science causal claim:
+
+> PCM does not autonomously invent perceptual primaries, but
+> **faithfully preserves any task-asymmetric prior injected**.
+> The three primaries are not a free product of cyclic mixing,
+> nor a free product of cone genetics — they are a *causal
+> conspiracy* of both, with task pressure the dominant factor.
+
+This boundary is also the strongest interpretability claim PCM
+allows: anchor topology = the *minimal non-trivial representation
+of the task symmetry group* (PAPER §3.6 boundary; rotation-fixed
+when task adds explicit asymmetry; random-rotation otherwise).
+
+![F11 §6.8 three-layer causal ablation: left = supervised geometry breaks symmetry (EQUI), right = task-driven asymmetry breaks symmetry (red-wedge anchor)](./docs/figures/F11_color_primaries.png)
+
+### 6.9  Third domain — phoneme cross-language transfer and the dominant-layer switch
+
+§6.8 (colour) and §7.4 (number, below) both find layer **D**
+(task-driven asymmetry) to be the dominant cyclic-symmetry breaker.
+But §6.7 was careful: PCM reflects the *task's symmetry group*
+plus injected priors — nothing else. If a domain has a task whose
+symmetry group is *already* trivial (orthogonal categorical), then
+**D should not be dominant** — biological prior **B** should be.
+We test this falsifiable prediction on the phoneme domain.
+
+**Cross-language transfer setup** (`experiments/sleep_phoneme_transfer.py`).
+N = 20 phoneme inventory split per seed:
+
+* **Source language** — 13 phonemes seen by V/M/P heads during
+  training.
+* **Target language** — 7 phonemes held out from V/M/P training;
+  their bundle rows receive gradient *only* via prior layers.
+
+Test: target-language V/M/P accuracy (chance 0.5 / 0.25 / 0.25).
+This mirrors Werker & Tees 1984 *Infant Behav Dev* on infant
+universal-discrimination of non-native phonetic contrasts: can
+bundle representations encode the right axis identity for
+phonemes that the per-axis classifiers never saw?
+
+**Three causal layers** (paralleling §6.8 / §7.4):
+
+| Layer | Phoneme operationalisation |
+|---|---|
+| **B** Hardware | `make_articulator_centroids`: voice / manner / place cone bases (2 + 4 + 4 = 10 orthogonal directions); each phoneme's centroid is its (v, m, p) cone weighted sum |
+| **C** Statistics | `zipf_phonotactic_weights`: source phoneme sampling 1 / rank, modelling Zipf-style frequency (Maddieson 1984 / PHOIBLE) |
+| **D** Task | `MinimalPairHead`: pair-input 4-class head outputs `same / voice-diff / manner-diff / place-diff`; trained on full inventory (source + target) so target rows receive axis-relevant gradient *without* seeing per-axis labels directly |
+
+**5-condition × 5-seed result** (n_target = 7, epochs = 40, steps =
+120 / epoch). All conditions reach source acc = 1.000 ± 0.000;
+target acc only:
+
+| Condition | tgt V (chance 0.5) | tgt M (chance 0.25) | tgt P (chance 0.25) |
+|---|---|---|---|
+| **A** baseline | 0.514 ± 0.128 | 0.114 ± 0.064 | 0.257 ± 0.120 |
+| **B** + articulator centroid | **1.000 ± 0.000** | **0.943 ± 0.078** | **0.771 ± 0.078** |
+| **C** + Zipf source sampling | 0.486 ± 0.078 | 0.343 ± 0.078 | 0.171 ± 0.120 |
+| **D** + minimal-pair head | **1.000 ± 0.000** | 0.257 ± 0.186 | 0.229 ± 0.163 |
+| **B+C+D** combined | 0.971 ± 0.064 | 0.771 ± 0.128 | 0.714 ± 0.175 |
+
+**Four core observations**:
+
+1. **A baseline target accuracy is at or below chance**. Target M
+   acc = 0.114 < chance 0.25, target P ≈ chance. V/M/P heads
+   trained perfectly on source produce systematically biased
+   *random* outputs on target — same input-side ceiling we observe
+   in §7.5 number length-OOD.
+
+2. **B alone (articulator centroid) achieves nearly perfect
+   transfer**: tgt_V = 1.000, tgt_M = 0.943, tgt_P = 0.771.
+   **This is the strongest single-layer transfer signal observed
+   in any PCM domain so far** — much stronger than B alone in
+   §6.8 / §7.4. Transfer strength tracks the axis dimension:
+   V > M > P, where V is binary, M and P are 4-way.
+
+3. **D alone transfers only the voice axis**: `MinimalPairHead`
+   defaults to consuming `voice_bias`, so its pair signal flows
+   only into voice. tgt_V = 1.000 but tgt_M, tgt_P stay at
+   chance. This gives the precise mechanism: minimal-pair signal
+   only transfers along the facet it consumes.
+
+4. **Phoneme is B-dominant, opposite of colour and number**. Far
+   from being inconsistent, this is exactly what PCM's
+   falsifiable prediction principle requires:
+   - colour `mix` task has Z₁₂ cyclic symmetry → D required
+   - number arithmetic has ℤ translational symmetry → D required
+   - phoneme V/M/P axes are categorical and orthogonal → task
+     symmetry group is trivial → B alone suffices
+
+| Domain | Task symmetry | Dominant layer | B-alone transfer | D-alone transfer |
+|---|---|---|---|---|
+| Colour mixing | Z₁₂ cyclic | **D** (ripe head) | EQUI 4 / 8 (weak) | red-wedge 1.00 |
+| Number arithmetic | ℤ translational | **D** (last-digit) | spike₁₀ +0.07 | spike₁₀ +0.38 |
+| **Phoneme V/M/P** | **trivial (orthogonal)** | **B (articulator)** | **V = 1.0, M = 0.94** | V = 1.0, M / P chance |
+
+This gives PCM its **task-symmetry × dominant-layer principle**:
+
+> The dominant causal layer is determined by the complexity of
+> the task symmetry group. The stronger the task symmetry
+> (cyclic / translational), the more task-driven asymmetry (D)
+> is required to break it. The weaker the task symmetry
+> (orthogonal categorical), the more the biological prior (B)
+> can transfer cleanly on its own.
+
+This dovetails with cognitive neuroscience: human colour
+categorical perception requires V4 hue-selective neuron training
+under foraging pressure (D-dominant); base-10 number columns
+require explicit instruction (D-dominant); phoneme features fall
+out of articulator anatomy from birth (mouth posture → place
+axis; vocal-fold vibration → voice axis; nasal vs oral → manner
+axis), and 6-month-old infants discriminate every phonetic
+contrast on first hearing (Werker & Tees 1984), precisely
+because articulator-grounded prior already supplies axis-aligned
+geometry, no further task pressure required.
+
+![F15 §6.9 phoneme cross-language transfer: 5 conditions × 5 seeds × {V, M, P} target axes; B alone is dominant, V = 1.000, M = 0.943, P = 0.771](./docs/figures/F15_phoneme_transfer.png)
+
 ---
 
 ## 7  Experiment 4 — Pure Base-10 Emergence (Negative)
@@ -738,6 +1097,245 @@ Hand-coded base-10 priors *do* unlock 100 % digit-length extrapolation
 (see D93a / `COMPOSITIONAL_NUMBER_STUDY.md`), on par with Abacus
 embeddings (McLeish et al. 2024) but with ~10³× less data — at the
 cost of baking base-10 into the architecture rather than learning it.
+This is §7.4's content.
+
+### 7.4  Three causal layers reverse the §7 base-10 negative
+
+§7.4 mirrors §6.8 on the linear number domain. The §7 null is not
+a fundamental PCM limitation — it just says "without injecting
+*any* of the three layers (prior / statistics / task), base-10
+column structure does not emerge from symmetric four-arithmetic".
+Now we test whether injecting them reverses the negative.
+
+**Operationalisation** (`experiments/sleep_number_decimal.py`):
+
+| Layer | Number-domain operationalisation |
+|---|---|
+| **B** Hardware | `make_decimal_cone_centroids`: 10 unit cones + 10 tens cones (orthogonal, dim = 128); number *n*'s centroid weights cone[n%10] at 1.0 and cone[10 + n//10] at 0.5 |
+| **C** Statistics | `round_number_weights(boost = 5.0)`: multiples of 10 sampled 5× more often, modelling Zipf-style discourse bias toward round numbers |
+| **D** Task | `LastDigitHead`: single-input 10-class classifier predicting `n % 10`, sharing the `arithmetic_bias` facet |
+
+**5 condition × 8 seed result** (N = 30, 30 epochs × 240 steps,
+sleep k = 10 so anchor count equals the digit equivalence class
+count):
+
+| Condition | spike₁₀ ± std | units_gap ± std<br>cos[+10] − cos[+1] | last-digit purity ± std |
+|---|---|---|---|
+| **A** baseline (random + uniform + no head) | +0.290 ± 0.042 | −0.157 ± 0.056 | 0.445 ± 0.052 |
+| **B** + decimal cones | +0.355 ± 0.040 | −0.093 ± 0.081 | 0.491 ± 0.058 |
+| **C** + round-number sampling | +0.384 ± 0.067 | −0.044 ± 0.093 | 0.483 ± 0.062 |
+| **D** + last-digit head | **+0.667 ± 0.052** | **+0.467 ± 0.064** | **0.744 ± 0.073** |
+| **B+C+D** combined | **+0.684 ± 0.038** | **+0.559 ± 0.045** | **0.876 ± 0.085** |
+
+`units_gap` = avg cos(*n*, *n* + 10) − avg cos(*n*, *n* + 1).
+**Baseline is negative** (linear geometry: adjacent numbers most
+similar). **D and BCD flip it positive**: same-units numbers more
+similar than adjacent numbers — the direct signature of base-10
+column structure.
+
+**Three core observations** (exactly parallel to §6.8):
+
+1. **D is the strongest cyclic-symmetry breaker**. A single
+   single-input last-digit head doubles spike₁₀ (+0.290 → +0.667),
+   flips units_gap sign, and lifts purity from 0.445 to 0.744.
+   Same phenomenon as the colour ripe-fruit head pushing
+   red-wedge from 0.62 to 1.00.
+2. **B alone is insufficient**: decimal-cone centroids only give
+   spike₁₀ +0.065 over baseline. Reason: the
+   additive / ordinal symmetry of four-arithmetic is a strong
+   force that re-uniformises hue rows during gradient descent,
+   partly erasing the centroid-level base-10 bias.
+3. **B + C + D tightens spike₅ to ≈ 0**. ``spike_5`` is −0.370 in
+   baseline but only −0.072 ± 0.092 in BCD, with ``spike_10``
+   maintained at +0.684. spike₁₀ ≫ spike₅ together with spike₅ ≈ 0
+   = **clean 10-periodicity** — exactly what §7 looked for and
+   could not find. The cleanest base-10 column structure emerges
+   in BCD combined, not in any single layer.
+
+**§6.8 / §7.4 symmetric double-positive**:
+
+| Domain | Symmetry | D-alone strongest signal | B+C+D combined strongest signal |
+|---|---|---|---|
+| Colour (§6.8) | cyclic on hue ring | red-wedge anchor 0.62 → 1.00 | EQUI 4 / 8 + red-wedge 1.00 |
+| Number (§7.4) | linear on number line | spike₁₀ +0.29 → +0.67<br>units_gap sign-flip | spike₁₀ +0.68 + spike₅ ≈ 0<br>last-digit purity 0.88 |
+
+**Trade-off is symmetric too**. BCD pays an OOD cost (A: 0.82,
+BCD: 0.74): pushing bundle geometry toward base-10 column
+structure separates it from "raw additive prediction accuracy".
+This is the algorithmic-emergence analogue of §6.6.2's "ρ ↔ OOD
+trade-off" in colour.
+
+**§7 / §7.4 joint claim**:
+
+> §7 negative is not a PCM limitation but a *diagnostic signal*
+> about which causal chains produce which algorithmic
+> representations. Base-10 column structure does not emerge from
+> symmetric four-arithmetic alone (§7), but giving the system a
+> single-input last-digit task makes it emerge in 8 / 8 seeds at
+> spike₁₀ = +0.67 (§7.4). This matches developmental psychology
+> on children's arithmetic acquisition — preschool children
+> handle small additions without ever extracting "units / tens"
+> categories; categorical column abstraction stabilises only with
+> formal schooling (a last-digit-like strong task signal; Geary
+> 2011 *Dev Psychol*; Siegler & Lortie-Forgues 2014
+> *Curr Dir Psychol Sci*).
+
+§7.4 and §6.8 jointly support PCM's central claim:
+**representational primitives reflect the task's symmetry group
+plus injected asymmetric priors, and nothing else**. Two
+qualitatively distinct domains, perfectly parallel reversals —
+the strongest evidence that PCM is a viable falsifiable
+computational testbed.
+
+![F12 §7.4 three-layer reversal of base-10 negative: left = spike₁₀, middle = units_gap sign flip, right = last-digit cluster purity](./docs/figures/F12_number_decimal.png)
+
+### 7.5  Length extrapolation hits a clean architectural ceiling
+
+§7.4 reconstructs base-10 column structure within N = 30. A
+sharper question: does the injected base-10 prior let PCM
+**extrapolate** arithmetic from [1, 30] to [31, 100] — the
+analogue of the human ability to handle three-digit addition
+once one has internalised two-digit addition?
+
+**Setup** (`experiments/sleep_number_extrapolate.py`):
+
+* Concept registry: 1..100 (every integer up to the test range
+  has a bundle row).
+* `QuadArithHead` trains on a, b, c ∈ [1, 30] only.
+* `LastDigitHead` (D / BCD condition) samples the **full**
+  [1, 100] range so length-OOD bundle rows still receive
+  last-digit gradient.
+* Centroid mode: `random` or `decimal_cones`.
+
+**Test splits**:
+
+* `in_range`: random hold-out of in-range triples (§7.4 baseline).
+* `length-100`: a > 30 OR b > 30, a, b, c ≤ 100.
+
+**5 condition × 5 seed result** (N_train = 30, N_total = 100):
+
+| Condition | in-range OOD ± std | length-100 OOD ± std |
+|---|---|---|
+| **A** baseline (random + uniform + no head) | 0.786 ± 0.054 | 0.051 ± 0.000 |
+| **B** + decimal cones | 0.506 ± 0.058 | 0.051 ± 0.000 |
+| **C** + round-number sampling | 0.657 ± 0.064 | 0.051 ± 0.000 |
+| **D** + last-digit head | 0.639 ± 0.049 | 0.055 ± 0.001 |
+| **B+C+D** combined | 0.664 ± 0.084 | **0.062 ± 0.003** |
+
+Length-100 OOD chance level ≈ 1 / 100 = 0.01; the observed
+0.051 reflects the head's systematic bias on novel inputs (it
+always picks the same argmax target ≈ 5 % of the time), not
+genuine generalisation.
+
+**Three observations**:
+
+1. **A / B / C are strictly at chance** (0.051 ± 0.000). Centroid
+   prior or sampling bias alone cannot support length
+   extrapolation — consistent with their weak in-range signal
+   in §7.4.
+2. **D / BCD lift is statistically detectable but small**: BCD
+   reaches 0.062 over A's 0.051 (+1.1 pp), with 5 of 5 seeds in
+   the same direction and σ = 0.003. The signal is real but the
+   absolute gain is small.
+3. **A clean PCM-architectural ceiling**: `QuadArithHead`'s
+   forward must compute `a + b` from bundle rows, but rows for
+   31–100 **never received gradient on the quad task**. Even if
+   the last-digit head injects per-digit identity (cone[d]), the
+   QuadArithHead must *also* learn how to combine cone[d] with
+   cone[tens] for ``a + b`` — and it never gets that opportunity
+   on 31–100.
+
+**Consistent with PAPER §3.6 / §9 / §7.3 declared boundary**.
+§3.6 already states: "predicting an unseen *single number* is
+impossible under D91/D92 — concept bundle is a per-concept
+parameter; an unregistered concept has no bundle". We use
+``n_total > N`` and full-range LastDigitHead to *partially*
+relax this, but the effect is tiny.
+
+§9 second item: "ground-truth concept IDs given, not
+discovered". §7.5 tests whether prior layers can compensate
+when concept IDs *are* present but never trained on the task —
+the answer is "barely".
+
+§7.3 already says: PCM gives *geometric* emergence (task
+symmetry group) but not *algorithmic* emergence (base-10
+factorisation / multi-digit addition). Length extrapolation
+needs not just per-digit identity (D supplies it) but also
+**column-major composition** ("digits add, with carry"), which
+requires either (a) visual glyph grounding, (b) D93a-level slot
+generators, or (c) multi-step composition curriculum.
+
+**Final answer to short-form outstanding question**: the three-
+layer protocol reverses §6.7 / §7 negatives (about *geometric*
+representations) on both colour and number, but **does not**
+reverse the length-extrapolation negative (about *algorithmic*
+computation). This is yet another clean PCM testbed boundary —
+separating "geometric emergence" from "algorithmic emergence"
+in a way that cognitive science routinely conflates.
+
+![F13 §7.5 length extrapolation: 5 conditions × {in-range OOD, length-100 OOD}, 5 seeds; A/B/C strictly at chance, D/BCD give a statistically detectable but small lift](./docs/figures/F13_number_extrapolate.png)
+
+#### 7.5-color  Colour-domain analogue: hue holdout reveals the closed-output-set ceiling
+
+§7.5 number's ceiling is "chance level + 1.1 pp". The colour
+domain admits a cleaner test: **hold out a target hue** (every
+mixing triple whose target *c* = 5 is dropped from training)
+and measure 5-condition × 5-seed accuracy on those held-out
+triples (`experiments/sleep_color_holdout.py`).
+
+**Setup**: N = 12 hues all registered (concept registry
+unchanged); training drops the ~10 mixing triples whose target
+is hue 5 (about 8 % of training data); test = those held-out
+triples; head argmax accuracy reported. Centroid / sampling /
+ripe head as in §6.8 5-cell.
+
+**5-condition × 5-seed = 25 runs**:
+
+| Condition | train acc ± std | hue-5 OOD ± std |
+|---|---|---|
+| **A** baseline | 1.000 ± 0.000 | **0.000 ± 0.000** |
+| **B** + LMS centroid | 0.689 ± 0.048 | **0.000 ± 0.000** |
+| **C** + green-peak sampling | 1.000 ± 0.000 | **0.000 ± 0.000** |
+| **D** + ripe-fruit head | 1.000 ± 0.000 | **0.000 ± 0.000** |
+| **B+C+D** combined | 0.711 ± 0.057 | **0.000 ± 0.000** |
+
+**25 / 25 strictly 0.000, well below the 1 / 12 = 0.083 chance
+baseline**. Cleaner ceiling than the number length-OOD: the
+head's softmax has never received positive cosine gradient on
+hue 5's centroid, so regardless of any prior layer it
+**never** predicts hue 5 — even if BCD's LMS centroid places
+hue 5 perfectly in cone basis, even if the ripe head pushes
+hue 5's bundle row away from the ripe wedge (a negative
+gradient), the closed-output-set restriction prunes hue 5 from
+the head's output range entirely.
+
+**Two boundaries paired**:
+
+| Experiment | Restriction | A baseline | BCD | Phenomenology |
+|---|---|---|---|---|
+| **Number length-OOD-100** | bundle row never task-trained | 0.051 ± 0.000 | 0.062 ± 0.003 | near chance, prior gives weak signal |
+| **Colour hue holdout** | head output centroid never task-trained | 0.000 ± 0.000 | 0.000 ± 0.000 | strict 0, head never outputs the held-out class |
+
+The number ceiling lives on the **input side** (bundle row
+absent from quad gradient), the colour ceiling on the
+**output side** (centroid absent from cosine gradient). Both
+are pre-stated in PAPER §3.6 / §9 as the D91/D92 static
+boundary, with empirical 25-25 / 5-5 confirmation here.
+
+**Cognitive-science implication**: in human visual development,
+infants need to see hue 5 (green) as a category target before
+they can output "5" in a mixing-style task. PCM's "centroid in
+geometry but never task-trained → strict-zero on holdout"
+mirrors a measurable phenomenon in developmental psychology:
+infants have full LMS cone responses from birth (sensory
+representation present) but categorical colour naming
+stabilises only at 4–6 months and is highly correlated with
+which hues have lexical labels in the surrounding language
+(Berlin & Kay 1969; Skelton et al. 2017 *PNAS*). Having a
+sensory representation of a class is not the same as being
+able to identify it task-wise.
+
+![F14 §7.5-color hue holdout: 5 conditions × 5 seeds all OOD = 0.000, in contrast to number length-OOD's +1.1 pp lift; closed-output-set ceiling](./docs/figures/F14_color_holdout.png)
 
 ---
 
