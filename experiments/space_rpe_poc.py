@@ -105,6 +105,8 @@ class RelativePositionMoveHead(nn.Module):
         slot_dim: int = SLOT_DIM,
         hidden: int = HIDDEN,
         variant: str = "rpe_only",
+        attn_logit_scale: float = 1.0,
+        gate_mode: str = "fixed",
     ) -> None:
         super().__init__()
         self.n_rows = n_rows
@@ -114,6 +116,19 @@ class RelativePositionMoveHead(nn.Module):
         self.n_dr = 2 * self.max_dr + 1
         self.n_dc = 2 * self.max_dc + 1
         self.variant = variant
+        self.gate_mode = gate_mode  # "fixed" / "schedule" / "learned"
+        self.attn_logit_scale = float(attn_logit_scale)
+        # A2 learned gate: a single scalar logit, sigmoid → λ ∈ (0, 1).
+        # Init at logit = 4.0 so sigmoid(4) ≈ 0.98 ≈ 1.0; the model
+        # has to actively pull this down if it wants to suppress
+        # the attention path. If it learns to ≈ 0, that's evidence
+        # the model itself identifies slot attention as noise on
+        # this task.
+        if gate_mode == "learned":
+            self.attn_gate_logit = nn.Parameter(torch.tensor(4.0))
+        # A1 schedule: external (set per-batch via .set_progress).
+        self._schedule_lambda = 1.0
+        # RPE table + classifier (always present).
         self.rpe = nn.Embedding(self.n_dr * self.n_dc, embed_dim)
         self.classifier = nn.Sequential(
             nn.Linear(embed_dim, hidden),
@@ -125,6 +140,19 @@ class RelativePositionMoveHead(nn.Module):
             self.k_proj = nn.Linear(slot_dim, hidden, bias=False)
             self.v_proj = nn.Linear(slot_dim, hidden, bias=False)
             self.slot_out = nn.Linear(hidden, n_classes)
+
+    def set_progress(self, progress: float) -> None:
+        """A1: linear decay schedule. ``progress`` ∈ [0, 1]; we
+        decay λ from 1.0 → 0.0 across the first half of training.
+        """
+        self._schedule_lambda = max(0.0, 1.0 - 2.0 * float(progress))
+
+    def current_attn_lambda(self) -> torch.Tensor | float:
+        if self.gate_mode == "learned":
+            return torch.sigmoid(self.attn_gate_logit)
+        if self.gate_mode == "schedule":
+            return self._schedule_lambda
+        return self.attn_logit_scale
 
     def _rpe_lookup(
         self, dr: torch.Tensor, dc: torch.Tensor,
@@ -151,7 +179,10 @@ class RelativePositionMoveHead(nn.Module):
         score = (q * k).sum(dim=-1, keepdim=True) * scale
         attn = torch.tanh(score)
         slot_logits = self.slot_out(attn * v)
-        return rpe_logits + slot_logits
+        lam = self.current_attn_lambda()
+        if isinstance(lam, torch.Tensor):
+            return rpe_logits + lam * slot_logits
+        return rpe_logits + float(lam) * slot_logits
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -166,6 +197,8 @@ def _run_one(
     epochs: int, steps_per_epoch: int, ood_ratio: float,
     variant: str,
     batch_size: int = 64, lr: float = 5e-3,
+    attn_logit_scale: float = 1.0,
+    gate_mode: str = "fixed",
 ) -> dict:
     torch.manual_seed(seed)
     rng = random.Random(seed)
@@ -203,6 +236,8 @@ def _run_one(
         embed_dim=32, n_classes=5,
         slot_dim=SLOT_DIM, hidden=HIDDEN,
         variant=variant,
+        attn_logit_scale=attn_logit_scale,
+        gate_mode=gate_mode,
     ).to(DEVICE)
 
     params = list(head.parameters())
@@ -224,9 +259,13 @@ def _run_one(
         )
 
     t0 = time.time()
+    total_steps = epochs * steps_per_epoch
+    global_step = 0
     for epoch in range(1, epochs + 1):
         head.train()
         for step_i in range(steps_per_epoch):
+            head.set_progress(global_step / max(total_steps - 1, 1))
+            global_step += 1
             batch = [train_pool[rng.randrange(len(train_pool))]
                      for _ in range(batch_size)]
             dr, dc = _displacement(batch)
@@ -284,10 +323,16 @@ def _run_one(
             hits += logits.argmax(-1).eq(tgt).sum().item()
         return hits / len(triples)
 
+    # Report final gate / lambda value (key A2 evidence).
+    final_lambda = head.current_attn_lambda()
+    if isinstance(final_lambda, torch.Tensor):
+        final_lambda = float(final_lambda.detach().item())
     return {
         "seed": seed,
         "wall_s": time.time() - t0,
         "variant": variant,
+        "gate_mode": gate_mode,
+        "final_attn_lambda": float(final_lambda),
         "train_acc": _eval(splits["train"]),
         "test_random_in_range": _eval(splits["test_random"]),
         "test_mixed_OOD": _eval(splits["test_mixed_OOD"]),
@@ -310,6 +355,18 @@ def main() -> None:
     ap.add_argument("--epochs", type=int, default=20)
     ap.add_argument("--steps-per-epoch", type=int, default=240)
     ap.add_argument("--ood-ratio", type=float, default=0.15)
+    ap.add_argument("--attn-logit-scale", type=float, default=1.0,
+                    help="rpe_plus_attn only: lambda for "
+                         "(rpe_logits + lambda * slot_logits). "
+                         "Use 0.0 for RPE-only, 1.0 for equal mix.")
+    ap.add_argument("--gate-mode",
+                    choices=["fixed", "schedule", "learned"],
+                    default="fixed",
+                    help="rpe_plus_attn lambda control: 'fixed' "
+                         "uses --attn-logit-scale; 'schedule' decays "
+                         "linearly 1.0 -> 0.0 across first half of "
+                         "training; 'learned' uses a sigmoid'd scalar "
+                         "parameter and reports its final value.")
     ap.add_argument("--out", type=Path,
                     default=Path("outputs/v3_rpe"))
     args = ap.parse_args()
@@ -335,13 +392,18 @@ def main() -> None:
             steps_per_epoch=args.steps_per_epoch,
             ood_ratio=args.ood_ratio,
             variant=args.variant,
+            attn_logit_scale=args.attn_logit_scale,
+            gate_mode=args.gate_mode,
         )
         rows.append(r)
+        gate_str = ""
+        if args.variant == "rpe_plus_attn":
+            gate_str = f"  λ_final={r['final_attn_lambda']:.3f}"
         print(
             f"  [seed={seed}] train={r['train_acc']:.3f}  "
             f"in_range={r['test_random_in_range']:.3f}  "
             f"mixed_OOD={r['test_mixed_OOD']:.3f}  "
-            f"outer_OOD={r['test_outer_OOD']:.3f}  "
+            f"outer_OOD={r['test_outer_OOD']:.3f}{gate_str}  "
             f"({r['wall_s']:.1f}s)"
         )
 
@@ -363,6 +425,7 @@ def main() -> None:
         "test_random_in_range": _stats("test_random_in_range"),
         "test_mixed_OOD": _stats("test_mixed_OOD"),
         "test_outer_OOD": _stats("test_outer_OOD"),
+        "final_attn_lambda": _stats("final_attn_lambda"),
     }
     (args.out / "summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False, default=str)

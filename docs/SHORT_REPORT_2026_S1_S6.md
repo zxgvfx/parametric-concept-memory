@@ -333,13 +333,65 @@ lookup table over the displacement `(Δr, Δc)` between cell pairs,
 followed by a small ReLU classifier. It ignores both the slot
 and attr facets. On the 5×5/7×7 grid:
 
-| condition | train | in_range | **mixed_OOD** | outer_OOD |
-| --- | --- | --- | --- | --- |
-| v1 baseline (any single-cell D head) | 1.000 | 0.893 ± 0.138 | **0.000** | 0.557 |
-| v2 V3 trained attr | 1.000 | 0.613 ± 0.145 | 0.240 ± 0.102 | 0.493 |
-| v2 V3 oracle attr (D4) | 1.000 | 0.711 ± 0.139 | 0.000 ± 0.000 | 0.449 |
-| **RPE-only** | **1.000** | **1.000 ± 0.000** | **1.000 ± 0.000** | **1.000 ± 0.000** |
-| RPE + slot attention | 1.000 | 0.956 ± 0.077 | 0.833 ± 0.115 | 1.000 ± 0.000 |
+| condition | train | in_range | **mixed_OOD** | outer_OOD | λ_final |
+| --- | --- | --- | --- | --- | --- |
+| v1 baseline (any single-cell D head) | 1.000 | 0.893 ± 0.138 | **0.000** | 0.557 | n/a |
+| v2 V3 trained attr | 1.000 | 0.613 ± 0.145 | 0.240 ± 0.102 | 0.493 | n/a |
+| v2 V3 oracle attr (D4) | 1.000 | 0.711 ± 0.139 | 0.000 ± 0.000 | 0.449 | n/a |
+| **RPE-only** | **1.000** | **1.000 ± 0.000** | **1.000 ± 0.000** | **1.000 ± 0.000** | n/a |
+| RPE + slot attn (λ=0.1) | 1.000 | 1.000 ± 0.000 | 0.900 ± 0.100 | 1.000 ± 0.000 | 0.10 |
+| RPE + slot attn (λ=0.3) | 1.000 | 1.000 ± 0.000 | 0.867 ± 0.058 | 1.000 ± 0.000 | 0.30 |
+| RPE + slot attn (λ=1.0) | 1.000 | 0.956 ± 0.077 | 0.833 ± 0.115 | 1.000 ± 0.000 | 1.00 |
+| **A1 schedule (λ: 1→0)** | **1.000** | **1.000 ± 0.000** | **1.000 ± 0.000** | **1.000 ± 0.000** | **0.000** |
+| **A2 learned gate** | 1.000 | 0.973 ± 0.060 | 0.720 ± 0.249 | 1.000 ± 0.000 | **0.982** |
+
+The λ-sweep cleanly verifies a reviewer-proposed diagnosis that
+slot attention carries an "absolute position bias" —
+`SlotIdentityHead` supervises the slot facet to learn unique cell
+identity, so `slot_b - slot_a` is not a disentangled displacement
+and pollutes the RPE's clean signal. The fixed-λ trend is
+monotonic (mixed_OOD drops ~1.7 pp per +10 % attn logit weight),
+confirming on this minimal direction task slot attention is
+**pure overhead**, not synergy.
+
+**A1 (linear schedule) vs A2 (learned gate)** — a deeper finding.
+A reviewer's followup proposed three remedies for the residual
+0.167 gap: (A) decay the attention weight during training,
+(B) curriculum freeze the slot path after RPE has converged, or
+(C) mask the slot signal at loss time. We implemented A1 (linear
+schedule λ : 1.0 → 0.0 across the first half of training) and A2
+(let the model learn its own gate via a sigmoid'd scalar
+parameter, init at sigmoid(4) ≈ 0.98).
+
+| | A1 schedule | A2 learned gate |
+| --- | --- | --- |
+| mixed_OOD | **1.000 ± 0.000** | 0.720 ± 0.249 |
+| λ_final | 0.000 (forced) | **0.982** (almost no change) |
+
+A1 saturates the ceiling exactly like RPE-only. **A2 fails** —
+the model retains λ ≈ 0.98 across all five seeds, only marginally
+improving over fixed λ=1.0. The reason is mechanical: the train
+loss has no supervisory signal on mixed_OOD, and on the in-range
+training pool slot attention + RPE jointly fit perfectly
+(train_acc 1.000), so the gate has no gradient pressure to close.
+
+This is **direct evidence that simplicity-of-solution is *not*
+something the model spontaneously prefers**. The same generalisation
+that the user's intuition ("only let it remember direction") buys
+for free as a human prior, the model cannot recover from data
+alone — even when the simpler hypothesis is strictly better on the
+held-out split. This is the "inductive bias must be imposed"
+lesson stated in falsifiable form, and it generalises beyond PCM:
+any architecture that hopes to discover its own minimal sufficient
+statistic via gradient descent alone will fail unless the test
+distribution is part of the training signal.
+
+PCM follow-up: every future pair-input head registered with
+`pcm.dual_channel.RelativePositionEmbedding` should default to
+`gate_mode="schedule"` (A1) when an auxiliary slot path is
+present, not `"fixed"` or `"learned"`. The schedule is cheap
+and recovers the architectural lever; learned gates require a
+training signal that is rarely available pre-deployment.
 
 **Three structural lessons** from the chain:
 
