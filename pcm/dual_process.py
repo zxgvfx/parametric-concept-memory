@@ -45,6 +45,8 @@ __all__ = [
     "IterativeDiffCook",
     "DiffCookReport",
     "route_diff",
+    "DistillReport",
+    "distill_cook_to_rpe",
 ]
 
 
@@ -357,3 +359,162 @@ def route_diff(
         # Cook missing, fall back to RPE even out of range.
         return int(rpe_predict(a_idx, b_idx)), "rpe"
     raise ValueError("route_diff requires at least one of rpe_predict / cook")
+
+
+# ---------------------------------------------------------------------------
+# distill_cook_to_rpe — E4 sleep cache: System 2 → System 1 consolidation.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DistillReport:
+    """Per-step diagnostics for :func:`distill_cook_to_rpe`. Useful for
+    visualising the consolidation curve (loss should decrease as RPE
+    learns to mimic cook on the OOD displacement range)."""
+
+    n_steps: int
+    n_pairs_distilled: int
+    final_loss: float
+    initial_loss: float
+    cook_oracle_acc: float = 0.0
+
+
+def distill_cook_to_rpe(
+    cook: IterativeDiffCook,
+    rpe_step_fn: Callable[..., torch.Tensor],
+    rpe_parameters: list[torch.nn.Parameter],
+    *,
+    sample_pairs: list[tuple[int, int]],
+    optimizer: torch.optim.Optimizer | None = None,
+    lr: float = 5e-3,
+    n_steps: int = 200,
+    batch_size: int = 32,
+    rpe_loss_fn: Callable[
+        [torch.Tensor, torch.Tensor], torch.Tensor
+    ] | None = None,
+    delta_to_idx: Callable[[int], int] | None = None,
+) -> DistillReport:
+    """**Sleep cache (E4)** — distill the cook's procedural knowledge
+    into the RPE table by training the RPE on `(a, b, cook_diff(a, b))`
+    triples.
+
+    This is the falsifiability core of the developmental-trajectory
+    invariant E4 in PCM_V3_DUAL_PROCESS_DESIGN §6: Year-1 procedural
+    performance becomes Year-3 conceptual fact. After distillation,
+    the RPE table covers a broader displacement range and routing
+    increasingly prefers the cheap System-1 path on what was
+    previously OOD.
+
+    The function is **decoupled from any specific RPE architecture**:
+    the caller passes ``rpe_step_fn(delta_idx) -> logits`` (a closure
+    over their concrete `RelativePositionEmbedding` head) plus the
+    parameter list to optimise. This keeps `pcm.dual_process` free of
+    a hard dependency on `pcm.heads.v2_dual_channel`.
+
+    Args:
+        cook: trained :class:`IterativeDiffCook` whose predictions
+            serve as the distillation oracle on OOD pairs.
+        rpe_step_fn: callable that takes a 1-D LongTensor of
+            ``delta`` values and returns ``(B, n_classes)`` logits.
+        rpe_parameters: list of ``nn.Parameter`` to optimise. Pass
+            ``list(rpe_head.parameters())`` for the standard case.
+        sample_pairs: list of ``(a_idx, b_idx)`` integer endpoints.
+            Caller should pre-sample pairs with displacements in
+            the range they want the RPE to learn (typically the
+            cook's OOD success range).
+        optimizer: optional pre-configured optimiser; if ``None``,
+            a fresh AdamW with the given ``lr`` is used.
+        lr: learning rate for the default optimiser.
+        n_steps: distillation gradient steps.
+        batch_size: pairs per gradient step.
+        rpe_loss_fn: ``(logits, target_idx) -> scalar``; defaults
+            to cross-entropy. Caller can override for e.g. soft
+            targets.
+        delta_to_idx: callable mapping integer displacement to the
+            class index expected by the RPE classifier. Defaults
+            to ``lambda d: d + (n_total - 1)`` where ``n_total``
+            is inferred from the largest ``|b - a|`` in
+            ``sample_pairs``. Pass an explicit lambda when the
+            class layout differs.
+
+    Returns a :class:`DistillReport` with initial / final losses and
+    the cook-oracle accuracy on the supplied pairs (sanity-check:
+    a cook that cannot solve its own OOD pairs cannot teach the
+    RPE anything, so this reads as a precondition meter).
+    """
+    import random
+
+    if not sample_pairs:
+        raise ValueError("sample_pairs must be non-empty")
+
+    if optimizer is None:
+        optimizer = torch.optim.AdamW(rpe_parameters, lr=lr)
+    if rpe_loss_fn is None:
+        rpe_loss_fn = F.cross_entropy
+
+    if delta_to_idx is None:
+        max_abs_delta = max(abs(b - a) for (a, b) in sample_pairs)
+        n_total_implied = max_abs_delta + 1
+        # Default class layout: 2 * n_total - 1 classes covering
+        # [-(n_total-1), +(n_total-1)] with offset n_total - 1.
+        offset = n_total_implied - 1
+        def delta_to_idx(d: int, _off: int = offset) -> int:  # noqa: E306
+            return d + _off
+
+    # Pre-compute cook predictions for the entire sample pool.
+    rng = random.Random(0xC0DE)
+    pool: list[tuple[int, int, int]] = []
+    cook_hits = 0
+    for (a, b) in sample_pairs:
+        diff_pred, rep = cook(a, b)
+        true_diff = b - a
+        if diff_pred == true_diff:
+            cook_hits += 1
+        # Use cook output as the distillation target. If cook
+        # disagrees with ground truth, the RPE will inherit the
+        # error -- this is part of the falsifiable contract.
+        pool.append((a, b, diff_pred))
+    cook_oracle_acc = cook_hits / max(len(sample_pairs), 1)
+
+    # Compute initial RPE loss for reporting.
+    target_device = (
+        rpe_parameters[0].device if rpe_parameters else torch.device("cpu")
+    )
+    with torch.no_grad():
+        deltas = torch.tensor(
+            [b - a for (a, b, _) in pool],
+            dtype=torch.long, device=target_device,
+        )
+        targets = torch.tensor(
+            [delta_to_idx(d_pred) for (_, _, d_pred) in pool],
+            dtype=torch.long, device=target_device,
+        )
+        logits = rpe_step_fn(deltas)
+        initial_loss = float(rpe_loss_fn(logits, targets).item())
+
+    # Distillation loop.
+    final_loss = initial_loss
+    for _ in range(n_steps):
+        batch = [pool[rng.randrange(len(pool))] for _ in range(batch_size)]
+        deltas = torch.tensor(
+            [b - a for (a, b, _) in batch],
+            dtype=torch.long, device=target_device,
+        )
+        targets = torch.tensor(
+            [delta_to_idx(d_pred) for (_, _, d_pred) in batch],
+            dtype=torch.long, device=target_device,
+        )
+        logits = rpe_step_fn(deltas)
+        loss = rpe_loss_fn(logits, targets)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        final_loss = float(loss.item())
+
+    return DistillReport(
+        n_steps=n_steps,
+        n_pairs_distilled=len(pool),
+        final_loss=final_loss,
+        initial_loss=initial_loss,
+        cook_oracle_acc=cook_oracle_acc,
+    )

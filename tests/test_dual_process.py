@@ -25,8 +25,10 @@ import torch
 
 from pcm.dual_process import (
     DiffCookReport,
+    DistillReport,
     IterativeDiffCook,
     SuccessorHead,
+    distill_cook_to_rpe,
     route_diff,
 )
 
@@ -287,6 +289,123 @@ class TestDP3RouteDiff(unittest.TestCase):
         # which then sees b == a so converges with diff=0.
         self.assertEqual(route, "cook")
         self.assertEqual(diff, 0)
+
+
+# ---------------------------------------------------------------------------
+# DP4 — distill_cook_to_rpe (E4 sleep cache).
+# ---------------------------------------------------------------------------
+
+
+class TestDP4DistillCookToRPE(unittest.TestCase):
+    """E4 sleep cache: cook predictions distilled into RPE table.
+
+    Uses a tiny synthetic RPE head (single linear layer) and a
+    perfect-sign cook to test the distillation primitive in
+    isolation from the full v3 training pipeline. The full
+    end-to-end E4 validation is in
+    ``experiments/number_dual_process_sleep_poc.py``.
+    """
+
+    def _make_perfect_cook(self, n: int) -> IterativeDiffCook:
+        head = _PerfectSignHead(slot_dim=4, max_step=1)
+        return IterativeDiffCook(
+            successor_head=head,
+            identity_lookup=_ordinal_lookup(n),
+            max_iters=2 * n, cursor_min=0, cursor_max=n - 1,
+        )
+
+    def test_dp4a_loss_decreases(self) -> None:
+        """RPE distillation loss should decrease over training steps."""
+        torch.manual_seed(0)
+        N = 30
+        cook = self._make_perfect_cook(N)
+        n_classes = 2 * N - 1
+        rpe = torch.nn.Linear(1, n_classes)
+
+        def _step_fn(deltas: torch.Tensor) -> torch.Tensor:
+            return rpe(deltas.float().unsqueeze(-1))
+
+        sample_pairs = [(0, K) for K in range(5, N)]
+        report = distill_cook_to_rpe(
+            cook=cook,
+            rpe_step_fn=_step_fn,
+            rpe_parameters=list(rpe.parameters()),
+            sample_pairs=sample_pairs,
+            n_steps=200, batch_size=16,
+            delta_to_idx=lambda d, _N=N: d + (_N - 1),
+        )
+        self.assertLess(report.final_loss, report.initial_loss)
+        self.assertGreater(report.cook_oracle_acc, 0.95)
+
+    def test_dp4b_rpe_learns_distilled_targets(self) -> None:
+        """After distillation, RPE.argmax should match cook on
+        the distilled pairs. Uses a proper embedding-table RPE
+        (lookup by integer delta + linear classifier) — the same
+        architecture pattern as the production v3 head."""
+        torch.manual_seed(1)
+        N = 20
+        cook = self._make_perfect_cook(N)
+        n_classes = 2 * N - 1
+        # Embedding(2*N-1, 8) → Linear(8, n_classes); the embedding
+        # is keyed on the shifted delta index so each delta can
+        # learn its own classifier output.
+        embed = torch.nn.Embedding(2 * N - 1, 8)
+        clf = torch.nn.Linear(8, n_classes)
+
+        def _step_fn(deltas: torch.Tensor) -> torch.Tensor:
+            idx = deltas + (N - 1)
+            return clf(embed(idx))
+
+        params = list(embed.parameters()) + list(clf.parameters())
+        sample_pairs = [(a, b) for a in range(N) for b in range(N)
+                         if a != b][:80]
+        distill_cook_to_rpe(
+            cook=cook,
+            rpe_step_fn=_step_fn,
+            rpe_parameters=params,
+            sample_pairs=sample_pairs,
+            n_steps=400, batch_size=16,
+            lr=1e-2,
+            delta_to_idx=lambda d, _N=N: d + (_N - 1),
+        )
+        # Check RPE accuracy on the same distilled pairs.
+        with torch.no_grad():
+            hits = 0
+            for a, b in sample_pairs:
+                d = torch.tensor([b - a], dtype=torch.long)
+                pred_class = int(_step_fn(d).argmax(-1).item())
+                pred_diff = pred_class - (N - 1)
+                if pred_diff == b - a:
+                    hits += 1
+            self.assertGreater(
+                hits / len(sample_pairs), 0.7,
+                "RPE failed to learn cook's predictions on distilled pairs",
+            )
+
+    def test_dp4c_empty_pairs_raises(self) -> None:
+        torch.manual_seed(0)
+        cook = self._make_perfect_cook(10)
+        rpe = torch.nn.Linear(1, 19)
+
+        def _step_fn(d):
+            return rpe(d.float().unsqueeze(-1))
+
+        with self.assertRaises(ValueError):
+            distill_cook_to_rpe(
+                cook=cook,
+                rpe_step_fn=_step_fn,
+                rpe_parameters=list(rpe.parameters()),
+                sample_pairs=[],
+                n_steps=10,
+            )
+
+    def test_dp4d_distill_report_dataclass(self) -> None:
+        rep = DistillReport(
+            n_steps=10, n_pairs_distilled=100,
+            final_loss=0.5, initial_loss=2.0, cook_oracle_acc=0.95,
+        )
+        self.assertEqual(rep.n_steps, 10)
+        self.assertLess(rep.final_loss, rep.initial_loss)
 
 
 if __name__ == "__main__":

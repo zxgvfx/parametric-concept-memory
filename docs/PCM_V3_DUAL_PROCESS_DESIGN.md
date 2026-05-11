@@ -296,20 +296,72 @@ and 2–3 hours of focused work, mirroring the F49 / F50 v2 freeze.
 
 ---
 
+## 8.5 E4 sleep cache — implemented and validated (F53)
+
+`distill_cook_to_rpe(cook, rpe_step_fn, rpe_parameters,
+sample_pairs, …)` is the public API for the sleep-cache phase. It
+re-uses the cook as an oracle on OOD pairs, supplying targets to
+the RPE classifier. The function is decoupled from any specific
+RPE architecture — caller passes a closure over their concrete
+`RelativePositionEmbedding` head plus the parameter list to
+optimise.
+
+**Stratified sampling correctness note**: a naïve uniform sample
+of `(a, b)` pairs over `|Δ| ∈ (train_max, n_total)` under-
+represents large displacements (K=99 has only 1 valid pair vs
+K=20 with 80). The reference experiment
+`experiments/number_dual_process_sleep_poc.py` does **bucketed
+quota sampling** — each `|Δ|` gets `distill_pairs / n_buckets`
+pairs, drawn with replacement when the bucket is smaller. Without
+this stratification, the RPE never sees the rare large-K pairs
+during distillation and `phase2 RPE acc @ K=K_max` stays at 0.
+
+**Empirical result (F53, 3 seeds × 15 epochs, N=100,
+train_max=|Δ|≤19, distill_steps=400, distill_pairs=4000)**:
+
+| metric | phase 1 | phase 2 (post-distill) |
+| --- | --- | --- |
+| RPE acc at K=99 | 0.000 ± 0.000 | **1.000 ± 0.000** |
+| Distill loss | 10.x | 1.x (~10× reduction) |
+| Cook acc at K=99 | 1.000 ± 0.000 | 1.000 ± 0.000 (unchanged) |
+
+The RPE table fully internalises the cook's procedural knowledge
+on OOD displacements after a single sleep pass. This is the
+**falsifiable computational implementation** of the
+"Year-1 procedural performance predicts Year-3 conceptual fact"
+longitudinal trajectory observed in the JNC 2025 study.
+
+**Caveat on cook routing fraction**: the experiment's
+`route_diff` continues to use the original `train_max=19` as its
+threshold, so `cook_route_fraction` does not drop after phase 2
+(0.557 → 0.557). This is a deliberate design choice — routing
+threshold is decoupled from RPE capability so the user can
+control the System-1 / System-2 trade-off independently. A
+follow-up "adaptive routing" extension that infers the threshold
+from a calibration sweep over post-distill RPE accuracy is
+listed in §9.
+
 ## 9. Open follow-ups (after E1–E5 ship)
 
-1. **Multi-axis successor** — generalise `SuccessorHead` to predict
+1. **Adaptive routing** — after F53's E4 sleep cache, the RPE's
+   coverage range expands from `train_max` to the cook's success
+   range. Routing should infer the new threshold via a quick
+   calibration sweep (sample a few K, find the largest K where
+   RPE matches ground truth ≥ 0.95). This is the natural
+   companion to E4: phase 2 lets RPE handle bigger displacements,
+   adaptive routing surfaces that capability to the dispatcher.
+2. **Multi-axis successor** — generalise `SuccessorHead` to predict
    multi-axis steps (Δr, Δc) on the spatial domain; compare with
    v2 RPE on length-extrapolating spatial OOD.
-2. **Routing learned end-to-end** — replace `train_max_abs_delta`
+3. **Routing learned end-to-end** — replace `train_max_abs_delta`
    with a small classifier predicting whether RPE will succeed,
    tested against the A2 finding (does the model learn its own
    decision threshold without explicit pressure?).
-3. **Cross-domain successor heads** — colour: hue rotation steps;
+4. **Cross-domain successor heads** — colour: hue rotation steps;
    phoneme: feature flips; space: cardinal moves. The same
    `SuccessorHead` API across all four domains gives a unified
    System 2 substrate.
-4. **Compare to ALiBi / RoPE on number** — does a functional RPE
+5. **Compare to ALiBi / RoPE on number** — does a functional RPE
    alone bridge the same gap, or is the dual-process architecture
    strictly stronger? Predicted: dual-process > ALiBi on
    cognitive plausibility metrics (E5 RT scaling) even when
