@@ -41,6 +41,8 @@ __all__ = [
     "spread_regularizer",
     "pair_attention_logits",
     "RelativePositionEmbedding",
+    "SinusoidalRelativePositionEmbedding",
+    "ALiBiRelativePositionBias",
 ]
 
 
@@ -438,3 +440,143 @@ class RelativePositionEmbedding(nn.Module):
             stride *= size
         assert idx is not None
         return self.table(idx)
+
+
+# ---------------------------------------------------------------------------
+# Functional RPE — sinusoidal & ALiBi-style alternatives.
+# ---------------------------------------------------------------------------
+
+
+class SinusoidalRelativePositionEmbedding(nn.Module):
+    """Continuous-function relative-position embedding using
+    sinusoidal basis (Vaswani et al. 2017 §3.5, generalised to k
+    displacement axes).
+
+    Unlike :class:`RelativePositionEmbedding` which is a finite
+    lookup table, this module computes
+    ``[sin(ω₀ Δ), cos(ω₀ Δ), sin(ω₁ Δ), cos(ω₁ Δ), …]`` directly
+    from the integer (or floating-point) displacement, so it has
+    **no train-range cap**: a sinusoidal RPE trained on |Δ| ≤ 19
+    can be queried at |Δ| = 99 and the basis is well-defined.
+
+    Whether the *classifier* downstream of the basis can also
+    generalise is the empirical question F55 measures. The 2026
+    RoPE-as-phase-modulation paper (arxiv 2602.10959) shows that
+    the answer is no in general: extrapolation depends critically
+    on the frequency spectrum and the classifier's spectral
+    selectivity. We provide this as a baseline to compare against
+    PCM v3's iterative cook.
+
+    Args:
+        n_axes: number of displacement axes (``len(ranges)``
+            equivalent).
+        embed_dim: total output dim (must be ``2 * n_freq * n_axes``
+            for the basis to fit; we round down silently).
+        base: frequency base (default 10000, RoPE / sinusoidal
+            standard).
+    """
+
+    def __init__(
+        self, n_axes: int, embed_dim: int,
+        *, base: float = 10000.0,
+    ) -> None:
+        super().__init__()
+        if n_axes < 1:
+            raise ValueError(f"n_axes must be >= 1, got {n_axes}")
+        if embed_dim < 2 * n_axes:
+            raise ValueError(
+                f"embed_dim ({embed_dim}) too small for n_axes "
+                f"({n_axes}); need >= 2 * n_axes."
+            )
+        self.n_axes = int(n_axes)
+        self.embed_dim = int(embed_dim)
+        self.base = float(base)
+        # Frequencies per axis: half of (embed_dim / n_axes) sin/cos
+        # pairs each.
+        per_axis = (embed_dim // n_axes) // 2
+        if per_axis < 1:
+            raise ValueError(
+                "embed_dim too small to allocate at least one "
+                "sin/cos pair per axis"
+            )
+        self._per_axis = per_axis
+        # Inverse frequencies: 1 / base^(2k / D_axis)
+        inv_freq = 1.0 / (
+            self.base ** (
+                torch.arange(0, per_axis, dtype=torch.float32) * 2.0
+                / (per_axis * 2.0)
+            )
+        )
+        self.register_buffer("inv_freq", inv_freq)
+
+    @property
+    def n_displacements(self) -> int:
+        # Continuous → infinite support; reported as -1 for
+        # compatibility with discrete callers that interrogate
+        # this attribute.
+        return -1
+
+    def forward(self, *deltas: torch.Tensor) -> torch.Tensor:
+        if len(deltas) != self.n_axes:
+            raise ValueError(
+                f"expected {self.n_axes} delta tensors, got {len(deltas)}"
+            )
+        parts: list[torch.Tensor] = []
+        for d in deltas:
+            d_f = d.float().unsqueeze(-1)  # (B, 1)
+            angles = d_f * self.inv_freq.to(d_f.device)  # (B, per_axis)
+            parts.append(torch.sin(angles))
+            parts.append(torch.cos(angles))
+        out = torch.cat(parts, dim=-1)
+        # Pad with zeros if the requested embed_dim is larger than
+        # the basis we built (rounding down on per_axis).
+        if out.shape[-1] < self.embed_dim:
+            pad = torch.zeros(
+                *out.shape[:-1], self.embed_dim - out.shape[-1],
+                device=out.device, dtype=out.dtype,
+            )
+            out = torch.cat([out, pad], dim=-1)
+        return out
+
+
+class ALiBiRelativePositionBias(nn.Module):
+    """ALiBi-style scalar bias for pair-input heads (Press et al.
+    2022, generalised to multi-axis displacements).
+
+    Returns a single scalar per pair: ``-slope * sum(|Δᵢ|)``. The
+    slope is per-axis and learned by default (initialised to 1.0
+    as in the BLOOM paper). The output is meant to be **added to a
+    pair-input head's logits as a bias**, biasing predictions
+    toward small displacements without saturating like a lookup
+    or a sinusoid.
+
+    For PCM v3's number-domain length-extrapolation comparison
+    (F55), ALiBi alone is unlikely to predict a precise diff
+    class — it has no per-K capacity, only a smooth bias. We
+    provide it as the third functional baseline against
+    SinusoidalRPE (full-spectrum) and the iterative cook
+    (System 2 procedural). The 3-way contrast is precisely what
+    "is functional RPE strictly stronger than dual-process for
+    length-OOD?" needs to falsify.
+    """
+
+    def __init__(
+        self, n_axes: int, *, init_slope: float = 1.0,
+    ) -> None:
+        super().__init__()
+        if n_axes < 1:
+            raise ValueError(f"n_axes must be >= 1, got {n_axes}")
+        self.n_axes = int(n_axes)
+        self.slopes = nn.Parameter(
+            torch.full((n_axes,), float(init_slope))
+        )
+
+    def forward(self, *deltas: torch.Tensor) -> torch.Tensor:
+        if len(deltas) != self.n_axes:
+            raise ValueError(
+                f"expected {self.n_axes} delta tensors, got {len(deltas)}"
+            )
+        bias = torch.zeros_like(deltas[0], dtype=torch.float32)
+        for i, d in enumerate(deltas):
+            bias = bias - self.slopes[i] * d.abs().float()
+        return bias.unsqueeze(-1)  # (B, 1)
