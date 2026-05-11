@@ -48,6 +48,29 @@ publication-quality figures in [`docs/figures/`](./docs/figures/).
 
 ![Four-domain universality of bundle geometry](./docs/figures/F4_four_domain_universality.png)
 
+## What's new — PCM v3 Dual-Process (May 2026)
+
+> **Update beyond v2 freeze (F49):** number domain length-OOD has
+> a System 2 path. The user-proposed "演算 mechanism" is the
+> PCM operationalisation of dual-process theory: RPE = retrieval
+> (System 1), `IterativeDiffCook` = procedural sequencing (System
+> 2). On 5 seeds × 15 epochs, the cook reaches `K=99` accuracy
+> **1.000 ± 0.000** vs RPE 0.000 (+100 pp), trained only on
+> |Δ|=1. Cook accuracy *exceeds* the multiplicative prediction
+> `0.99^99 ≈ 0.37` — direct evidence that **iteration is error-
+> correction**, matching Geary 1996 / Ashcraft 1992 on procedural
+> robustness. Full design + literature mapping in
+> [`docs/PCM_V3_DUAL_PROCESS_DESIGN.md`](./docs/PCM_V3_DUAL_PROCESS_DESIGN.md);
+> see also commit `ad1fd9c` for the F51 implementation.
+>
+> Public API:
+>
+> - `pcm.dual_process.SuccessorHead` — `(slot, attr)` pair → signed
+>   step
+> - `pcm.dual_process.IterativeDiffCook` — composition of N
+>   successor calls; supports v2 dual-channel attr routing
+> - `pcm.dual_process.route_diff` — System-1 / System-2 dispatcher
+
 ## What's new — PCM v2 milestone (May 2026)
 
 A nine-finding mid-cycle published as F40–F49 (commits in

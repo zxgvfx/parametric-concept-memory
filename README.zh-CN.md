@@ -46,6 +46,27 @@ Forum / *Cognitive Science* short report）见
 
 ![四领域 bundle 几何普适性](./docs/figures/F4_four_domain_universality.png)
 
+## 最新进展 — PCM v3 双过程数字架构（2026 年 5 月）
+
+> **v2 freeze (F49) 之后的更新**：number 域 length-OOD 有了
+> System 2 路径。用户提出的"演算机制"假说在 PCM 上落地为：
+> RPE = 检索 (System 1)，`IterativeDiffCook` = 程序性序列化
+> (System 2)。5 种子 × 15 epoch 实测 cook 在 `K=99` 上准确率
+> **1.000 ± 0.000** vs RPE 0.000（+100 pp），head 只在 |Δ|=1
+> 训练。Cook 准确率 *超过* multiplicative 理论预测
+> `0.99^99 ≈ 0.37` —— 直接证据 **迭代即纠错**（matching
+> Geary 1996 / Ashcraft 1992 论 procedural noise 鲁棒性）。
+> 完整设计 + 文献映射见
+> [`docs/PCM_V3_DUAL_PROCESS_DESIGN.md`](./docs/PCM_V3_DUAL_PROCESS_DESIGN.md)；
+> F51 实现见 commit `ad1fd9c`。
+>
+> 公共 API：
+>
+> - `pcm.dual_process.SuccessorHead` — `(slot, attr)` 对 → 有符号步长
+> - `pcm.dual_process.IterativeDiffCook` — N 次 successor 组合；
+>   支持 v2 dual-channel attr 通道
+> - `pcm.dual_process.route_diff` — System-1 / System-2 调度器
+
 ## 最新进展 — PCM v2 里程碑（2026 年 5 月）
 
 跨 9 个 finding 的中期成果（F40–F49 提交，详见

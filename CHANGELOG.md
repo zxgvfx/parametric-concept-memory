@@ -6,6 +6,100 @@ and the [Keep a Changelog](https://keepachangelog.com/) conventions.
 
 ## [Unreleased]
 
+### Added — PCM v3 Dual-Process Number Architecture (F51 – F52)
+
+The second architecture-level redesign of PCM, motivated by F48's
+number-domain length-OOD limit (RPE saturated 4/4 domains in F48
+but only to 0.764 on number, where test |Δ| exceeds train range).
+Validated by a seven-direction literature survey covering:
+dual-process theory in math cognition, ANS / IPS neural mechanisms,
+child arithmetic strategy choice, LLM scratchpad length
+generalisation, neuro-symbolic 2026 grounding ≠ compositionality,
+math-expert fMRI, RoPE/ALiBi mechanistic analysis.
+
+**Public API** (`pcm/dual_process.py`, ~270 LoC):
+- `SuccessorHead(slot_dim, attr_dim, max_step)` — single-step
+  predictor that outputs ``sign(b - a)`` for a pair of slot rows
+  (and optional attr rows from v2 dual-channel). Trained only on
+  small displacements; cook handles arbitrary |Δ| by composition.
+- `IterativeDiffCook(successor_head, identity_lookup)` — pure-
+  function PCM cook that applies SuccessorHead repeatedly until
+  the cursor reaches the target. Hard iteration cap, bounded
+  cursor support, optional attr routing via `with_attr=True`,
+  full diagnostic report (n_iters, converged, wall_seconds).
+- `route_diff(a, b, *, rpe_predict, cook, train_max_abs_delta)`
+  — System-1 / System-2 dispatcher; routes to RPE in-range,
+  cook out-of-range, with graceful fallback when either path
+  is missing.
+
+**Empirical results** (F51, `experiments/number_dual_process_poc.py`,
+5 seeds × 15 epochs, N=100, RPE train_max=|Δ|≤19, successor
+train_max=|Δ|≤1):
+
+| invariant | result | target |
+| --- | --- | --- |
+| E1 SuccessorHead 1-step acc | 0.966 ± 0.033 (max 1.000) | ≥ 0.99 (close) |
+| E2 cook curve K=1..99 | all ≥ 0.916, K=99 = 1.000 | follow `0.99^K` |
+| **E3 cook K=99 vs RPE K=99** | **1.000 ± 0.000 vs 0.000** | **+100 pp** |
+| E5 iters per K | K=99 → 99.0 iters exact | linear |
+
+**Key finding — iteration is error-correction**: Cook accuracy
+(1.000 at K=99) **exceeds** the multiplicative prediction
+0.99^99 ≈ 0.37, because each iteration re-queries the head with
+the current cursor and target. When the head miss-steps, the
+next iteration sees cursor on the wrong side of target and pulls
+it back. The cumulative error does not diverge — this is a
+Markov chain with strong drift toward target and bounded-noise
+step errors. Direct empirical match to Geary (1996) and Ashcraft
+(1992) on procedural-noise robustness.
+
+**Falsifiable correspondence to four cognitive-science literatures**
+(documented in `docs/PCM_V3_DUAL_PROCESS_DESIGN.md` §2):
+
+1. **Cognitive neuroscience**: angular gyrus retrieval (RPE
+   System 1) ↔ SMA / MTG / cerebellum procedural (cook System 2),
+   per Springer 2025 fMRI and Nat Commun 2024 7T imaging.
+2. **Developmental psychology**: counting → retrieval is the
+   universal trajectory (Year-1 procedural predicts Year-3
+   conceptual, JNC 2025); problem-size effect persists for
+   large problems (J Exp Child Psych 2025).
+3. **LLM scratchpad literature**: educated scratchpads achieve
+   6× length OOD generalisation; inductive scratchpads improve
+   compositional generalisation (NeurIPS 2024). Cook is the
+   PCM-native form of an educated scratchpad.
+4. **Neuro-symbolic 2026**: grounding ≠ compositionality (arxiv
+   2604.26521). PCM v2 RPE is grounding (saturates in-range);
+   v3 cook is the explicit compositional supervision.
+
+**Tests** (`tests/test_dual_process.py`, 17 passing):
+- DP1: SuccessorHead forward shapes, slot-only / slot+attr modes,
+  predict_step range, max_step validation.
+- DP2: IterativeDiffCook on synthetic perfect-sign oracles —
+  short convergence, K=99 length extrapolation, negative
+  direction, with_attr routing, max_iters cap, report dataclass.
+- DP3: route_diff dispatcher — in-range → RPE, OOD → cook,
+  fallback when one path missing, empty raises.
+
+124 / 124 tests passing post v3 addition (was 107 / 107 at the
+v2 freeze F49).
+
+**Documentation:**
+- `docs/PCM_V3_DUAL_PROCESS_DESIGN.md` — full design proposal,
+  seven-direction literature evidence chain, four-line
+  correspondence, five falsifiable invariants E1–E5, stop
+  conditions, MVP scope, and open follow-ups.
+
+**Open follow-ups** (per design doc §9):
+1. Sleep cache (E4) — Tier-G abstracts frequently-iterated K
+   into the RPE table, implementing the Year-1-procedural ↔
+   Year-3-conceptual longitudinal finding.
+2. Cross-domain successor heads — colour hue rotation, phoneme
+   feature flips, spatial cardinal moves on the same API.
+3. Functional RPE (sinusoidal / RoPE / ALiBi) comparison — does
+   the dual-process architecture strictly beat a continuous
+   position encoding on cognitive-plausibility metrics (E5
+   RT-by-Δ scaling)?
+
 ### Added — PCM v2 Dual-Channel + RPE Architecture (F40 – F49)
 
 The first architecture-level redesign of PCM since the original
