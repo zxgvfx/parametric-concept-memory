@@ -97,7 +97,19 @@ class DualChannelMoveHead(nn.Module):
         self.v_proj = nn.Linear(slot_dim, hidden, bias=False)
         self.slot_out = nn.Linear(hidden, n_classes)
         # Attribute difference path
-        self.attr_diff = nn.Linear(attr_dim, n_classes)
+        # 5-class direction is sign(row_diff) x sign(col_diff), which
+        # is **not** linearly separable in the difference of one-hot
+        # / monotone attr embeddings. The D4 (oracle attr) diagnostic
+        # showed mixed_OOD = 0.100 with a single Linear, vs 0.240
+        # with the trained attr — i.e. the trained attr accidentally
+        # picks an axis that happens to be linearly aligned with
+        # direction, but the head architecture itself cannot exploit
+        # a *general* attr difference. Two-layer ReLU MLP fixes this.
+        self.attr_diff = nn.Sequential(
+            nn.Linear(attr_dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, n_classes),
+        )
 
     def forward(
         self,

@@ -21,6 +21,7 @@ from __future__ import annotations
 from typing import Iterable
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 if False:  # TYPE_CHECKING
@@ -39,6 +40,7 @@ __all__ = [
     "successor_consistency_loss",
     "spread_regularizer",
     "pair_attention_logits",
+    "RelativePositionEmbedding",
 ]
 
 
@@ -348,3 +350,91 @@ def pair_attention_logits(
     attn = torch.sigmoid(score)
     out = attn * v
     return out @ out_proj
+
+
+# ---------------------------------------------------------------------------
+# Relative Position Embedding — the V3 architectural lever.
+# ---------------------------------------------------------------------------
+
+
+class RelativePositionEmbedding(nn.Module):
+    """Learnable embedding of integer displacement tuples
+    ``(Δ₁, …, Δₖ) ∈ ℤᵏ``.
+
+    Mirrors the discrete relative-position primitive from Shaw,
+    Uszkoreit & Vaswani 2018 (*Self-attention with relative
+    position representations*) and the spatial RoPE / ALiBi line
+    (Su et al. 2021; Press et al. 2022); the PCM use-case is to
+    give pair-input heads (e.g. spatial Move, numeric Diff,
+    phonetic feature-distance) an inductive bias that says **the
+    answer depends only on the displacement, not on the
+    individual concept identities**.
+
+    This is the architectural lever validated in V3 of the v2
+    MVP: the §7.5-space ``mixed_OOD = 0.000`` ceiling, which had
+    survived every single-cell D head we tried and only weakened
+    to 0.240 under v2 dual-channel attr learning, snaps to
+    ``mixed_OOD = 1.000`` across 5 seeds when the head's input
+    is a learned RPE table keyed on ``(Δr, Δc)``. See
+    ``docs/SHORT_REPORT_2026_S1_S6.md`` §V3-RPE for the full
+    diagnostic chain (D4 oracle-attr ablation pinpointed the
+    bottleneck to head-side displacement coverage, not bundle
+    geometry).
+
+    Args:
+        ranges: per-axis ``(min_delta, max_delta)`` pairs, both
+            inclusive. The lookup table allocates
+            ``∏ᵢ (max_i − min_i + 1)`` entries.
+        embed_dim: per-displacement embedding dim.
+    """
+
+    def __init__(
+        self,
+        ranges: list[tuple[int, int]],
+        embed_dim: int,
+    ) -> None:
+        super().__init__()
+        if not ranges:
+            raise ValueError("ranges must be non-empty")
+        self.ranges = [(int(lo), int(hi)) for lo, hi in ranges]
+        for lo, hi in self.ranges:
+            if lo > hi:
+                raise ValueError(f"invalid range ({lo}, {hi}): lo > hi")
+        self.embed_dim = int(embed_dim)
+        self._sizes = [hi - lo + 1 for lo, hi in self.ranges]
+        n = 1
+        for s in self._sizes:
+            n *= s
+        self.table = nn.Embedding(n, self.embed_dim)
+
+    @property
+    def n_displacements(self) -> int:
+        n = 1
+        for s in self._sizes:
+            n *= s
+        return n
+
+    def forward(self, *deltas: torch.Tensor) -> torch.Tensor:
+        """Look up RPE rows for a batch of displacements.
+
+        Each ``deltas[i]`` is a ``(B,)`` integer tensor of values
+        in ``[min_i, max_i]``. Returns ``(B, embed_dim)``.
+        """
+        if len(deltas) != len(self.ranges):
+            raise ValueError(
+                f"expected {len(self.ranges)} delta tensors, "
+                f"got {len(deltas)}"
+            )
+        idx = None
+        stride = 1
+        for d, (lo, _hi), size in zip(
+            reversed(deltas), reversed(self.ranges), reversed(self._sizes)
+        ):
+            shifted = d - lo
+            if idx is None:
+                idx = shifted * stride
+            else:
+                idx = idx + shifted * stride
+            stride *= size
+        assert idx is not None
+        return self.table(idx)

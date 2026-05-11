@@ -1,13 +1,21 @@
-# PCM 2026 Mid-Cycle Short Report (S1–S6)
+# PCM 2026 Mid-Cycle Short Report (S1–S6 + V1–V3 + RPE)
 
-**Status: draft, May 2026.** Companion to `docs/2026_LITERATURE_AND_PLANS.md`.
+**Status: draft, May 2026.** Companion to `docs/2026_LITERATURE_AND_PLANS.md`
+and `docs/PCM_V2_DUAL_CHANNEL_DESIGN.md`.
 
-This report documents seven causal experiments (S1, S2, S3, S4, S5, S6 + the
-S3-architectural follow-up) launched in response to the literature survey
-across cognitive neuroscience, developmental psychology, anthropology,
-philosophy and 2026 ML interpretability. Each finding is paired with the
-specific mechanism that produced it, the falsifiability criterion stated in
-advance in `2026_LITERATURE_AND_PLANS.md`, and the resulting Verdict.
+This report documents:
+
+1. seven causal experiments S1–S6 (+ S3 architectural follow-up) launched
+   from the 2026 literature survey;
+2. the v2 dual-channel architecture MVP that broke S3's strongest ceiling
+   (V1, V2, V3 invariants);
+3. the **RPE (Relative Position Embedding) finding** that fully saturates
+   the §7.5-space `mixed_OOD = 0.000` ceiling at 1.000 across 5 seeds.
+
+Each finding is paired with the specific mechanism that produced it, the
+falsifiability criterion stated in advance in
+`2026_LITERATURE_AND_PLANS.md` / `PCM_V2_DUAL_CHANNEL_DESIGN.md`, and the
+resulting Verdict.
 
 ---
 
@@ -307,6 +315,67 @@ slot-based collapse — are deferred to the long-form PAPER v2 outline.
 
 ---
 
+## V3 follow-up — Relative Position Embedding (the architectural lever)
+
+After v2 V3 cleared the partial bar at `mixed_OOD = 0.240 ± 0.102`
+(F43, commit `0ea7e90`) but did not reach the 0.30 strict target,
+we ran a four-step diagnostic chain to localise the bottleneck:
+
+| step | hypothesis | result | conclusion |
+| --- | --- | --- | --- |
+| v2 V3 (trained attr) | dual-channel partially fixes coverage | mixed_OOD = 0.240 ± 0.102 | partial; ceiling not yet broken |
+| **D4 oracle attr** | bottleneck is in attr learning, not the head | mixed_OOD = 0.100 ± 0.087 | **wrong:** oracle attr is *worse* |
+| D4 + ReLU head | maybe the linear `attr_diff` was too weak | mixed_OOD = 0.000 | head still can't read direction from `attr_a − attr_b` |
+| **RPE-only head** | bottleneck is head-side displacement coverage; `(Δr, Δc)` is the right key | **mixed_OOD = 1.000 ± 0.000** | **architectural lever found** |
+
+The RPE-only head is a learned `(2N − 1) × (2N − 1) → embed_dim`
+lookup table over the displacement `(Δr, Δc)` between cell pairs,
+followed by a small ReLU classifier. It ignores both the slot
+and attr facets. On the 5×5/7×7 grid:
+
+| condition | train | in_range | **mixed_OOD** | outer_OOD |
+| --- | --- | --- | --- | --- |
+| v1 baseline (any single-cell D head) | 1.000 | 0.893 ± 0.138 | **0.000** | 0.557 |
+| v2 V3 trained attr | 1.000 | 0.613 ± 0.145 | 0.240 ± 0.102 | 0.493 |
+| v2 V3 oracle attr (D4) | 1.000 | 0.711 ± 0.139 | 0.000 ± 0.000 | 0.449 |
+| **RPE-only** | **1.000** | **1.000 ± 0.000** | **1.000 ± 0.000** | **1.000 ± 0.000** |
+| RPE + slot attention | 1.000 | 0.956 ± 0.077 | 0.833 ± 0.115 | 1.000 ± 0.000 |
+
+**Three structural lessons** from the chain:
+
+1. The `mixed_OOD = 0.000` ceiling is **not** a bundle-level
+   limitation. Single-cell D heads, dual-channel attr, and even
+   *oracle* one-hot row+col attr all fail. The bundle has the
+   information; the head doesn't have the inductive bias to use
+   it.
+2. The right inductive bias is **displacement coverage at the
+   head level**: when training and test pairs share the same
+   `(Δr, Δc)` distribution (which is true for 5×5 inner pairs
+   covering all `|Δ| ≤ 4`), an RPE lookup obtains it for free.
+   `attr_a − attr_b` does *not* give it, because the
+   displacement of two absolute embeddings depends on which
+   region of embedding space each landed in during training.
+3. RPE + slot attention drops slightly to `mixed_OOD = 0.833`,
+   confirming that on this minimal direction task, **the slot
+   attention path is overhead**, not synergy. Slot attention is
+   only useful when the answer needs cell-specific features the
+   displacement can't supply (e.g. landmark labels, terrain).
+
+`pcm.dual_channel.RelativePositionEmbedding` is now a public
+PCM API: ``RelativePositionEmbedding(ranges=[(-N+1, N-1), (-M+1, M-1)],
+embed_dim=D)``. Forward takes per-axis integer delta tensors
+``(B,)`` and returns ``(B, D)`` lookups.
+
+**Verdict (V3 strict target ≥ 0.30):** ✅ *passed via RPE*.
+The v2 dual-channel design is correct as a *philosophy*
+(positional + attributional separation), but the v2 specific
+operationalisation through a per-cell attr facet is **not** the
+right home for displacement bias. Future PCM v2 work should
+register an explicit `(facet_displacement, RPE)` triple alongside
+the dual-channel pair when the task is intrinsically pair-input.
+
+---
+
 ## File pointers (for reproducibility)
 
 | Finding | Code | Output |
@@ -317,7 +386,12 @@ slot-based collapse — are deferred to the long-form PAPER v2 outline.
 | S3 mask-infer | `experiments/sleep_space_mask_infer.py` | `outputs/space_mask_infer_v2_5x20/summary.json` |
 | S4 IB | `experiments/ib_frontier_analysis.py` | `outputs/ib_color_from_hsae/summary.json` |
 | S5 cone-opponent | `experiments/sleep_color_cone_opponent.py` | `outputs/color_cone_opponent_8x30/summary.json` |
-| S6 analogy | `experiments/analogy_post_hoc.py` | `outputs/analogy_*/summary.json` (in flight) |
+| S6 analogy | `experiments/analogy_post_hoc.py` | `outputs/analogy_*/summary.json` |
+| v2 V1+V2 (number) | `experiments/number_dual_channel_poc.py` | `outputs/v2_after_fix/summary.json` (V1=1.000, V2=1.000) |
+| v2 V3 (space) | `experiments/space_dual_channel_poc.py` | `outputs/v3_diff_5x30/summary.json` (mixed_OOD = 0.240) |
+| V3 D4 oracle-attr | `experiments/space_v3_diagnostics.py --diag d4` | `outputs/v3_d4/summary.json` |
+| **V3 RPE-only** | `experiments/space_rpe_poc.py --variant rpe_only` | `outputs/v3_rpe_only/summary.json` (**mixed_OOD = 1.000**) |
+| V3 RPE + attn | `experiments/space_rpe_poc.py --variant rpe_plus_attn` | `outputs/v3_rpe_plus_attn/summary.json` |
 
 ---
 
