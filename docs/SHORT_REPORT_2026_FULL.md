@@ -1,9 +1,9 @@
-# PCM 2026 Short Report — From v1 Baselines to Dual-Process Physics
+# PCM 2026 Short Report — From v1 Baselines to Universal Operators
 
-**Status**: project-level synthesis, May 2026. Covers F40 → F61,
+**Status**: project-level synthesis, May 2026. Covers F40 → F62,
 the full arc from "literature-driven causal experiments" to
-"physics-as-procedural-cook + statistical-attractor heads — the
-complete System-1/System-2 substrate".
+"physics-as-procedural-cook + statistical-attractor heads + the
+universal-operator hypothesis — same concept, many muscles".
 
 This report is the cohesive narrative version of:
 
@@ -16,7 +16,8 @@ This report is the cohesive narrative version of:
 reorganised as a single argument suitable for a workshop /
 short-paper venue. Numbers are reproducible from the cited
 output JSONs and commit hashes; the suite passes 169 / 169
-unit tests at F61.
+unit tests at F62 (no new tests added; the experiment is
+fully self-contained in `experiments/`).
 
 ---
 
@@ -404,13 +405,100 @@ on a single GPU.
 
 ---
 
+## 3.7 F62 — Universal-operator hypothesis (cross-discipline transfer)
+
+The user's framing: *math, physics, chemistry are different
+muscles consuming the same underlying concept structure; a
+transformation discovered in one should apply in the others.*
+F62 is the falsifiable small-testbed proof of that picture.
+
+We construct three structurally-isomorphic but semantically-
+distinct tasks under the cyclic group ℤ_N (N=50):
+
+* **Math (M)** — ``a + Δ ≡ b (mod N)`` on integer states.
+* **Physics (P)** — ``x + v·dt ≡ x' (mod N)`` on a 1-D ring
+  lattice.
+* **Chemistry (C)** — ``ξ_in + Δ ≡ ξ_out (mod N)`` on
+  reaction-extent bins.
+
+The model has three pieces:
+
+* **Slot bundle** ``slot_d: ℤ_N → ℝ^D`` per discipline ``d`` —
+  the discipline-specific concept embedding.
+* **RPE table** ``rpe: ℤ_{2K+1} → ℝ^D`` — the displacement
+  embedding (one row per Δ).
+* **UniversalCombiner** ``T: (ℝ^D × ℝ^D) → ℝ^D`` — a 2-layer
+  residual MLP from ``(slot_a, rpe_Δ) → slot_b_pred``. Required
+  because the naive ``slot_a + rpe_Δ`` cannot represent cyclic-
+  group action (``sin(a + Δ) ≠ sin(a) + sin(Δ)``); this matches
+  Maruyama 2026's observation that group-equivariant
+  architectures must operate multiplicatively, not additively.
+
+Five conditions test five falsifiable invariants:
+
+| invariant | criterion | F62 result | status |
+|---|---|---|---|
+| **U1** joint-shared works | min per-discipline acc ≥ 0.95 | **1.000** | PASS |
+| **U2** sharing is free | shared ≥ separate − 3pp | 1.000 = 1.000 | PASS |
+| **U3** indep. RPEs align | Procrustes cos ≥ 0.85 *and* ≥ random + 0.20 | trained **1.000** vs random **0.631** | PASS |
+| **U4** frozen-op transfer | new-discipline acc ≥ 0.90 with op frozen | **0.996** | PASS |
+| **U5** permuted-slot neg | acc ≤ 0.20 (≈ chance) | **0.051** (random = 1/N = 0.020) | PASS |
+
+The story U3 + U4 + U5 jointly tell:
+
+> The ``UniversalCombiner + RPE`` learned in math transfers to
+> physics with **0.996** accuracy *without retraining the
+> operator*. Only physics's slot bundle needs training. The same
+> operator on permuted-slot physics drops to chance, ruling out
+> "the operator works on anything"; transfer is structural.
+> Independently-trained RPEs converge to the same algebraic
+> structure (cos = 1.0 vs random 0.63), confirming the cyclic-
+> group representation is essentially unique up to orthogonal
+> basis change.
+
+This is the smallest-testbed evidence we have for the picture
+that emerged across F40–F61: PCM's layered architecture
+(ConceptGraph + ParamBundle + heads) is the substrate for
+Wigner's "unreasonable effectiveness of mathematics" — *as an
+architectural property*, not a coincidence. Disciplines reuse
+the same operator because the operator is what concepts look
+like when stripped of decoder-specific clothing.
+
+The comparison to 2026 SOTA is illuminating:
+
+* OmniMol (2601.10791) demonstrates the same phenomenon —
+  particle-physics → molecular-dynamics transfer — but needs a
+  ~100M-parameter Point-Edge Transformer foundation model.
+  F62 ships a 17K-parameter version that survives the same
+  five falsification tests.
+* Intern-S1-Pro (2603.25040), SciAgent (2511.08151),
+  SciReasoner (2509.21320), FuXi-Uni (2601.01363) — all
+  trillion-scale unified scientific FMs treating cross-
+  discipline transfer as a *scaling* phenomenon. F62 reframes
+  it as an *architectural* one.
+
+Reproducibility: ``experiments/cross_discipline_operator.py``;
+output JSON in ``outputs/f62_full2/summary.json``. Walltime
+~95 s on a single GPU. Full design + literature notes in
+``docs/PCM_UNIVERSAL_OPERATOR_F62.md``.
+
+---
+
 ## 4. Open follow-ups
 
 These are the natural next steps. None blocks publication of
-F40 → F61 as a short report; all are concrete enough that any
+F40 → F62 as a short report; all are concrete enough that any
 of them could be the next milestone if pursued.
 
-1. **Distributional outputs for non-physics domains.** Apply
+1. **F62b–f — universal operator stress tests.** F62 succeeded
+   on cyclic ℤ_N. Open: non-abelian groups (D_n, S_n), continuous
+   Lie groups (RoPE-style), empirically natural disciplines
+   (Hooke / Coulomb / Newton on shared 1/r² template), operator
+   distillation (combine F62 with F59 sleep-cache), partial
+   isomorphism (graceful degradation as group structure
+   diverges). All described in §7 of
+   ``docs/PCM_UNIVERSAL_OPERATOR_F62.md``.
+2. **Distributional outputs for non-physics domains.** Apply
    v5 attractor heads to phoneme syllable-class outcomes and
    colour holdout-percept categories. Tests whether the head
    is genuinely domain-agnostic or contains a physics-specific
@@ -467,6 +555,7 @@ of them could be the next milestone if pursued.
 * `experiments/bouncing_ball_sleep_distill.py` — F59 v4 cache
 * `experiments/three_body_poc.py` — F60 cook applicability boundary
 * `experiments/three_body_attractor_poc.py` — F61 attractor A1–A4
+* `experiments/cross_discipline_operator.py` — F62 universal operator U1–U5
 
 ### Tests (169 / 169 passing)
 * `tests/test_dual_channel.py` (24 cases — DC1–DC6)
@@ -487,6 +576,7 @@ of them could be the next milestone if pursued.
 * `docs/PCM_V3_DUAL_PROCESS_DESIGN.md` — v3 design + §10 follow-ups
 * `docs/PCM_V4_PHYSICS_COOK_DESIGN.md` — v4 design
 * `docs/PCM_V5_ATTRACTOR_DESIGN.md` — v5 design + cognitive grounding
+* `docs/PCM_UNIVERSAL_OPERATOR_F62.md` — F62 design + 2026 lit + cognitive grounding
 * `docs/PCM_NEUROMORPHIC_PROFILE.md` — F58 hardware spec sheet
 * `docs/SHORT_REPORT_2026_S1_S6.md` — F40–F48 short report
 * `docs/SHORT_REPORT_2026_FULL.md` — this document
@@ -509,10 +599,14 @@ of them could be the next milestone if pursued.
 * `F61` PCM v5 attractor head — escape acc 0.836, log-time R²
   +0.517, energy KL 0.098 vs uniform 0.345 on Pythagorean;
   hybrid cook+attractor dispatcher closes the dual-process loop
+* `F62` universal-operator hypothesis — RPE+Combiner trained on
+  math transfers to physics @ acc 0.996 with op frozen; permuted
+  control fails to chance (0.051); independent-discipline RPEs
+  Procrustes-align at 1.00 vs random-baseline 0.63
 
 ---
 
 *Maintained as the canonical project-level summary. Update when
-each new milestone (F62+) ships. Numbers are reproducible from
+each new milestone (F63+) ships. Numbers are reproducible from
 the cited output JSONs; CLI commands are copy-pasteable from the
 docstrings of each experiment module.*
