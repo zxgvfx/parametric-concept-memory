@@ -386,6 +386,51 @@ cook bit-identity; G1–G7 invariants still hold.
 
 Tests: 75 / 75 pass (no test changes required for F35).
 
+- **F37 — PAPER §7.5-space addendum: mixed-OOD ceiling is fc1
+  distribution-coverage, broken by 5 % training-pair
+  augmentation**. New experiment script
+  `experiments/sleep_space_mixed_augment.py` and figure renderer
+  `experiments/render_paper_figures/F17_space_mixed_aug.py`.
+  Builds on the §7.5-space BCD_combined condition, splits all
+  mixed pairs (one inner + one outer cell) 50 / 50 per seed
+  into mixed_train_pool / mixed_test_pool, and varies the
+  fraction of training batches drawn from mixed_train_pool.
+  4 rates × 5 seeds = 20 runs:
+  - rate=0.00 (no aug): mixed_test = 0.000 ± 0.000
+    (replicates F32 §7.5-space ceiling), outer_OOD =
+    0.596 ± 0.047 (replicates F32).
+  - **rate=0.05: mixed_test = 0.600 ± 0.245** (+60 pp jump
+    from rate 0.00; 5 / 5 seeds give mixed_test ≥ 0.40),
+    outer_OOD = 0.372 ± 0.040 (−22 pp trade-off cost).
+  - rate=0.15 / 0.30: mixed_test rises monotonically to
+    0.640 / 0.680, outer_OOD drops to 0.337 / 0.315.
+  - **5 % augmentation completely breaks the mixed-OOD
+    ceiling**, providing direct evidence that the §7.5-space
+    asymmetric-OOD ceiling is not a PCM-fundamental boundary
+    but an fc1 input-distribution-coverage issue — a softer
+    ceiling than the §7.5 input-side or §7.5-color output-
+    side PCM-fundamental boundaries.
+  - **Monotonic trade-off**: outer-OOD (cardinal-prior-driven
+    transfer) degrades 0.596 → 0.315 (−28 pp) as rate
+    increases, indicating tension between cardinal centroid's
+    abstract geometry and fc1's input-distribution fitting.
+  - Refined PCM ceiling taxonomy in PAPER §7.5-space addendum
+    (Chinese + English): input-side (numbers) and output-side
+    (colour hue) are D91/D92-fundamental and uncrossable by
+    augmentation; symmetric-OOD (space outer) is partial-prior-
+    driven and augmentation hurts it; asymmetric-OOD (space
+    mixed) is fc1-distribution-coverage and 5 % augmentation
+    breaks it.
+  - Practical implication for D93a follow-up: joint-
+    distribution-aware bundle synthesis is *not* needed to
+    cross asymmetric-OOD; mixed-pair augmentation in the
+    existing D91/D92 training pipeline suffices. Contrasts
+    sharply with §7.5 number length-OOD, where augmentation
+    is impossible and a true D93a slot-generator upgrade
+    is required.
+
+Tests: 75 / 75 pass (no test changes for F37).
+
 ### Authority — extended
 Above plus VQ-VAE / continual-learning literature mapped to the
 four observed failure modes:

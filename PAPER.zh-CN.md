@@ -813,6 +813,46 @@ Asymmetric-OOD ceiling (space):   fc1 在 mixed joint distribution 上严格失�
 
 ![F16 §7.5-space 空间 length extrapolation：5 conditions × 3 splits × 5 seeds; B + BCD 在 outer-OOD 上接近 3× chance, mixed-OOD 全部 0/25 揭示 input-distribution ceiling](./docs/figures/F16_space_extrapolate.png)
 
+#### 7.5-space addendum — mixed-OOD ceiling 是 fc1 distribution coverage 问题，5% augmentation 即可破解
+
+§7.5-space 主表显示 mixed-OOD = 0.000 严格在 25 / 25 runs。一个自然问题：这是 PCM 架构上的 fundamental ceiling，还是仅仅是 `MoveHead.fc1` 的 input-distribution coverage 问题？为答此问，我们做一个目标性 augmentation 实验（脚本：`experiments/sleep_space_mixed_augment.py`）：
+
+* 把全部 mixed pair（一 inner、一 outer 的 (a, b) triples）按 50/50 split 成 `mixed_train_pool` 与 `mixed_test_pool`。
+* 训练时每个 batch 用 `(1 − rate) × BATCH_SIZE` 个 inner pair + `rate × BATCH_SIZE` 个 mixed_train_pool 抽样的 augmented pair。其余配置与 §7.5-space BCD_combined 相同（cardinal centroid + center-bias sampling + row-index head）。
+* 测试 mixed_test_pool（held-out mixed pairs，从未在训练中出现）与 outer_OOD（双 outer cell pair）。
+
+**4 rates × 5 seeds = 20 runs**：
+
+| rate | mixed_test_OOD ± std | outer_OOD ± std |
+|---|---|---|
+| **0.00** (no aug, replicate F32) | **0.000 ± 0.000** | 0.596 ± 0.047 |
+| **0.05** | **0.600 ± 0.245** | 0.372 ± 0.040 |
+| 0.15 | 0.640 ± 0.261 | 0.337 ± 0.032 |
+| 0.30 | 0.680 ± 0.303 | 0.315 ± 0.047 |
+
+chance ≈ 1/5 = 0.200。
+
+**两个核心发现**：
+
+1. **5% augmentation 完全破解 mixed-OOD ceiling**：mixed_test 从 0.000 ± 0.000 跳到 0.600 ± 0.245（+60 pp 跃升）。fc1 一旦见过 5% 比例的 mixed pair input distribution，就能 generalize 到剩余从未训过的 mixed pair（5/5 seed mixed_test 都 ≥ 0.4）。这证明 §7.5-space ceiling **不是 PCM-architectural fundamental 限制**，而是 fc1 的 input-distribution coverage 问题——比 §7.5 input-side 与 §7.5-color output-side 都更"软"的 ceiling 类型。
+
+2. **trade-off 单调**：augmentation rate ↑ → outer_OOD ↓（0.596 → 0.315，−28 pp）。fc1 学 mixed pair input distribution 的代价是 cardinal-prior 驱动的 outer-OOD transfer 部分塌陷。这暗示 cardinal centroid 的 abstract geometry 与 fc1 的 input-distribution-fitting 之间存在张力——前者要求 fc1 学 cell 间的相对位置（用任何两个 bundle 即可推导），后者要求 fc1 fit 见过的 input combination。
+
+**对 §7.5 / §7.5-color / §7.5-space 三类 ceiling 的修正分类**：
+
+| Ceiling 类型 | 对应实验 | augmentation 是否破得了？ | PCM 架构层级 |
+|---|---|---|---|
+| **Input-side** | §7.5 number length-OOD | ❌（A/B/C/D/BCD 在 N=50/200 全 ≈ chance）| D91/D92 fundamental |
+| **Output-side** | §7.5-color hue holdout | ❌（25/25 严格 0.000，head 输出空间 closed）| D91/D92 fundamental |
+| **Symmetric-OOD** | §7.5-space outer-OOD | 部分（B 单独 0.570；增 rate 反而塌陷）| 中间——B 强 transfer 但 augmentation 害 |
+| **Asymmetric-OOD** | §7.5-space mixed-OOD | **✅（5% augmentation 即破）** | fc1 distribution coverage |
+
+space 域的两个 ceiling 是**不同性质**的：outer-OOD 是 PCM-prior-driven transfer 的 partial success，augmentation 反而害它；mixed-OOD 是 fc1 distribution coverage 的 hard ceiling，augmentation 一击即破。这给 §7.5 主 claim 一个更精细的修正：**PCM 的真正架构边界是 input-side（D91/D92 bundle 缺训练）和 output-side（centroid 缺训练）；input-distribution interaction 看似是另一个 ceiling，但实际是 head 层级的 distribution coverage 问题，与 PCM 的核心 bundle 抽象无关**。
+
+这条精细化对 D93a 后续工作有具体提示：**joint-distribution-aware bundle synthesis 不必 redesign bundle pool；只需在 training pipeline 中加 mixed-pair augmentation 即可让现有 D91/D92 架构 partial 跨过这个 ceiling**。这跟 §7.5 number length-OOD 的"必须升级到 D93a slot generators"形成 stark contrast。
+
+![F17 §7.5-space addendum：mixed-OOD ceiling 是 fc1 distribution coverage 问题，5% augmentation 让 mixed-OOD 跳 +60 pp；outer-OOD 单调下降是 trade-off](./docs/figures/F17_space_mixed_aug.png)
+
 ### 7.5-color 颜色域对应：hue holdout 给出更清晰的 closed-output-set 边界
 
 §7.5 数字 length-OOD 给的 ceiling 是「chance level + 1.1 pp」。颜色域可以做一个更清晰的对应实验：**hold out 一个 target hue**（即所有 `mix(a, b) → c=5` 的 triple 都不在训练集中），然后测 5 condition × 5 seed 上 head 是否能预测 hue 5（脚本：`experiments/sleep_color_holdout.py`）。

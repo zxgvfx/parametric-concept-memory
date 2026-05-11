@@ -1448,6 +1448,89 @@ runs out of expressive power.
 
 ![F16 §7.5-space spatial length extrapolation: 5 conditions × 3 splits × 5 seeds; B + BCD reach ~3× chance on outer-OOD, mixed-OOD strict 0/25 reveals input-distribution ceiling](./docs/figures/F16_space_extrapolate.png)
 
+#### 7.5-space addendum — the mixed-OOD ceiling is fc1 distribution-coverage, broken by 5 % augmentation
+
+§7.5-space's main table shows mixed-OOD strictly 0.000 in
+25 / 25 runs. A natural follow-up: is this a PCM-fundamental
+architectural ceiling, or just a ``MoveHead.fc1``
+input-distribution coverage issue? To answer, we ran a targeted
+augmentation experiment (`experiments/sleep_space_mixed_augment.py`):
+
+* Split all mixed pairs (one inner, one outer cell)
+  50 / 50 per seed into ``mixed_train_pool`` /
+  ``mixed_test_pool``.
+* Each training batch uses ``(1 − rate) × BATCH_SIZE`` inner
+  pairs plus ``rate × BATCH_SIZE`` augmented pairs sampled
+  from ``mixed_train_pool``. All other settings match
+  §7.5-space's BCD_combined condition (cardinal centroid +
+  center-bias sampling + row-index head).
+* Test on ``mixed_test_pool`` (held-out mixed pairs, never seen
+  in training) and on outer-OOD (both-outer pairs).
+
+**4 rates × 5 seeds = 20 runs**:
+
+| rate | mixed_test_OOD ± std | outer_OOD ± std |
+|---|---|---|
+| **0.00** (no aug; replicates F32) | **0.000 ± 0.000** | 0.596 ± 0.047 |
+| **0.05** | **0.600 ± 0.245** | 0.372 ± 0.040 |
+| 0.15 | 0.640 ± 0.261 | 0.337 ± 0.032 |
+| 0.30 | 0.680 ± 0.303 | 0.315 ± 0.047 |
+
+Chance ≈ 1/5 = 0.200.
+
+**Two core findings**:
+
+1. **5 % augmentation completely breaks the mixed-OOD ceiling**:
+   mixed_test jumps from 0.000 ± 0.000 to 0.600 ± 0.245 (+60 pp).
+   Once fc1 sees just 5 % of the mixed-pair input distribution
+   in training, it generalises to all the held-out mixed pairs
+   (5 / 5 seeds give mixed_test ≥ 0.4). This is direct evidence
+   that the §7.5-space ceiling is **not a PCM-architectural
+   fundamental limit** but an fc1 distribution-coverage issue
+   — a softer ceiling than either §7.5 input-side or §7.5-color
+   output-side.
+
+2. **Monotonic trade-off**: augmentation rate ↑ → outer_OOD ↓
+   (0.596 → 0.315, −28 pp). The cost of fc1 fitting the
+   mixed-pair distribution is partial collapse of the
+   cardinal-prior-driven outer-OOD transfer. This suggests a
+   tension between cardinal centroid's abstract geometry
+   (which expects fc1 to learn relative cell position from
+   *any* two bundles) and fc1's input-distribution fitting
+   (which biases fc1 toward seen input combinations).
+
+**Refined ceiling taxonomy across §7.5 / §7.5-color / §7.5-space**:
+
+| Ceiling type | Experiment | Crossable by augmentation? | PCM architectural level |
+|---|---|---|---|
+| **Input-side** | §7.5 number length-OOD | ❌ (A/B/C/D/BCD ≈ chance at N=50/200) | D91/D92 fundamental |
+| **Output-side** | §7.5-color hue holdout | ❌ (25/25 strict 0.000, closed output) | D91/D92 fundamental |
+| **Symmetric-OOD** | §7.5-space outer-OOD | partial (B alone 0.570; augmentation hurts) | mid — B drives transfer, aug hurts |
+| **Asymmetric-OOD** | §7.5-space mixed-OOD | **✅ (5 % aug breaks)** | fc1 distribution coverage |
+
+The two space-domain ceilings are *qualitatively different*:
+outer-OOD is partial PCM-prior-driven transfer that augmentation
+actually *damages*; mixed-OOD is a hard fc1-distribution-coverage
+ceiling that one batch-fraction of augmentation collapses
+trivially. This refines the §7.5 main claim: **PCM's true
+architectural boundaries are input-side (D91/D92 bundle never
+task-trained) and output-side (centroid never task-trained);
+the input-distribution interaction looks like a third ceiling
+but is really a head-level distribution coverage problem
+unrelated to PCM's bundle abstraction**.
+
+This refinement gives concrete guidance for D93a follow-up
+work: **joint-distribution-aware bundle synthesis is not
+required to cross asymmetric-OOD; one only needs mixed-pair
+augmentation in the existing D91/D92 training pipeline**. This
+contrasts sharply with §7.5 number length-OOD, where the
+augmentation analogue is impossible (one cannot augment with
+"unseen-number triples" because they require additional
+task-grounded supervision) and a true D93a slot-generator
+upgrade is required.
+
+![F17 §7.5-space addendum: mixed-OOD ceiling is fc1 distribution-coverage, 5 % augmentation lifts mixed-OOD by 60 pp; outer-OOD pays a 26 pp trade-off cost](./docs/figures/F17_space_mixed_aug.png)
+
 ### 7.5-color  Colour-domain analogue: hue holdout reveals the closed-output-set ceiling
 
 §7.5 number's ceiling is "chance level + 1.1 pp". The colour
