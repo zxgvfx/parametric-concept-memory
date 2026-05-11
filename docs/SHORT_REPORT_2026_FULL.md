@@ -1,8 +1,8 @@
 # PCM 2026 Short Report — From v1 Baselines to Dual-Process Physics
 
-**Status**: project-level synthesis, May 2026. Covers F40 → F59,
+**Status**: project-level synthesis, May 2026. Covers F40 → F60,
 the full arc from "literature-driven causal experiments" to
-"physics-as-procedural-cook + neuromorphic deployment profile".
+"physics-as-procedural-cook + cook applicability boundary".
 
 This report is the cohesive narrative version of:
 
@@ -14,8 +14,8 @@ This report is the cohesive narrative version of:
 
 reorganised as a single argument suitable for a workshop /
 short-paper venue. Numbers are reproducible from the cited
-output JSONs and commit hashes; the suite passes 172 / 172
-unit tests at F59.
+output JSONs and commit hashes; the suite passes 157 / 157
+unit tests at F60.
 
 ---
 
@@ -236,14 +236,97 @@ callers continue working unchanged.
 
 ---
 
+## 3.5 F60 — N=3 multi-body physics, the cook applicability boundary
+
+We pushed the F57 PhysicsCook from 1-D ball (integrable) to N=3
+pairwise gravity in a 2-D plane (state ∈ ℝ¹²) and ran two
+variants of the same code, both with three equal masses and
+the same head architecture:
+
+| variant | initial condition | dt | role |
+|---|---|---|---|
+| **stable** | Chenciner-Montgomery figure-8 | 0.005 | known periodic orbit |
+| **chaotic** | Pythagorean three-body (Burrau 1913, m₃:m₄:m₅ at 3:4:5 triangle, all at rest) | 0.01 | famous bound chaotic system |
+
+The discriminator is the **ground-truth largest Lyapunov
+exponent** estimated by integrating two trajectories
+``s(t)`` and ``s'(t) = s(t) + δ`` in **float64** (FP32 round-off
+otherwise annihilates the perturbation before saturation),
+then taking the **maximum sliding-window slope** of
+``log ‖s'(t) − s(t)‖`` over 100-step windows up to attractor
+saturation. Pythagorean is a *non-smooth* impulsive chaotic
+system (close encounters cause discrete log-distance jumps),
+so the smooth linear-fit Lyapunov estimator is inadequate;
+the max-window estimator is the one that cleanly separates
+the regimes.
+
+Result (3 seeds, K=100, dt above, n_test=200 perturbed ICs):
+
+| metric | stable (figure-8) | chaotic (Pythagorean) |
+|---|---|---|
+| GT Lyapunov λ\* (per step) | **+0.0065** | **+0.0908** |
+| GT predictability horizon K\* ≈ 1/λ\* | ~150 | **~11** |
+| P1 1-step normalised MSE | 0.205 | **0.012** |
+| P2 polynomial fit R² | 0.996 | 0.985 |
+| P2 polynomial slope α | 1.80 | 2.26 |
+| P3 K=100 mean ‖s_true‖ | **2.84 (bounded)** | **257.6 (ejected)** |
+
+Despite the head learning the chaotic 1-step transition
+**better** (P1: 0.012 vs 0.205) — Pythagorean's smoother
+acceleration field is easier to fit than figure-8's
+near-singular crossings — the cook K-step rollout in
+the chaotic regime *blows up*: at K=75 the test trajectories
+already explode to ‖s_true‖=20 and by K=100 to 258, while
+the stable variant stays at 2.84. **Sensitive dependence on
+initial conditions amplifies an arbitrarily small per-step
+error to system-size after K ≈ K\* steps**, irrespective of
+how good the head is.
+
+This is the **falsifiable applicability boundary** of PCM v4
+cook (and equivalently of System-2 procedural rollout in
+general):
+
+> **Cook applies cleanly to systems with λ\* ≤ 1/K_target.**
+> Beyond that horizon no per-step head accuracy can save the
+> rollout, and F59-style sleep distillation (which copies the
+> cook into a 1-shot retrieval head) does **not** rescue
+> accuracy: the supervisory signal itself is unreliable past
+> K\*.
+
+Operationally this matches human cognition surprisingly well:
+people *can* mentally simulate a billiard table for a few
+collisions but cannot mentally roll out a 3-body planet
+configuration past the first close encounter. The horizon
+where mental simulation "feels useful" is exactly the
+Lyapunov horizon. Beyond K\*, humans switch from System-2
+simulation to System-1 statistical pattern matching ("I've
+seen many Pythagorean configurations end with ejection") —
+the same architectural transition F54 calibrates for
+arithmetic.
+
+For chaotic regimes the right architectural lever is **not**
+deeper cooking but **statistical attractor models**: predict
+distributions over future states (escape probability, energy
+distribution after binary scattering, …), not pointwise
+trajectories. This is on the F60+ follow-up list as a
+distinct PCM v5 design problem.
+
+Reproducibility: ``experiments/three_body_poc.py``;
+output JSONs in ``outputs/f60_stable_full2/`` and
+``outputs/f60_chaotic_full/``.
+
+---
+
 ## 4. Open follow-ups
 
 These are the natural next steps. None blocks publication of
-F40 → F59 as a short report; all are concrete enough that any
+F40 → F60 as a short report; all are concrete enough that any
 of them could be the next milestone if pursued.
 
-1. **Multi-body physics** — N=3 pairwise gravity; tests cook
-   on chaotic dynamics (vs the integrable F57 1-D ball).
+1. **Statistical-attractor heads** (the F60-induced new
+   problem) — past the Lyapunov horizon K\*, replace pointwise
+   PhysicsCook with a head that predicts distributions over
+   future states / escape outcomes. PCM v5 design problem.
 2. **Force-controlled trajectories** — give cook a target end
    state, search over force sequences (PCM ↔ planning).
 3. **Phoneme V/M/P 3-axis successor** — the F56 cross-domain
@@ -281,8 +364,9 @@ of them could be the next milestone if pursued.
 * `experiments/functional_rpe_vs_cook.py` — F55
 * `experiments/bouncing_ball_poc.py` — F57 P1/P2/P3
 * `experiments/bouncing_ball_sleep_distill.py` — F59 v4 cache
+* `experiments/three_body_poc.py` — F60 cook applicability boundary
 
-### Tests (172 / 172 passing)
+### Tests (157 / 157 passing)
 * `tests/test_dual_channel.py` (24 cases — DC1–DC6)
 * `tests/test_dual_process.py` (25 cases — DP1–DP5)
 * `tests/test_physics.py` (21 cases — PH1–PH4)
@@ -316,10 +400,12 @@ of them could be the next milestone if pursued.
 * `F57` v4 physics cook P1/P2/P3 all PASS
 * `F58` neuromorphic profile + 3 hardware predictions
 * `F59` v4 sleep cache lookup beats cook on K=50 by 1.8×
+* `F60` cook applicability boundary — figure-8 (λ\*=0.007)
+  cleanly polynomial; Pythagorean (λ\*=0.091) ejects at K\*~11
 
 ---
 
 *Maintained as the canonical project-level summary. Update when
-each new milestone (F60+) ships. Numbers are reproducible from
+each new milestone (F61+) ships. Numbers are reproducible from
 the cited output JSONs; CLI commands are copy-pasteable from the
 docstrings of each experiment module.*
