@@ -431,6 +431,45 @@ Tests: 75 / 75 pass (no test changes required for F35).
 
 Tests: 75 / 75 pass (no test changes for F37).
 
+- **F38 — `docs/PCM_CAUSAL_ABLATION_GUIDE.md` author's reference for
+  the five-condition protocol API**. Crystallises the F33 (and F34
+  dogfood) experience into a 50-line recipe for new domains:
+  - When to use the protocol (3-criterion checklist).
+  - Three-step recipe (declare conditions, write dispatcher, drive
+    with `run_causal_ablation`).
+  - Output schema with exact key names and example
+    `summary.json` skeleton.
+  - Optional cond-level post-aggregation pattern (for §6.7 / §6.8
+    style ad-hoc fields like `fraction_equidistant`).
+  - "What you do not need to do" anti-pattern list (no nested
+    loops, no domain `_stats`, no inventing new condition names).
+  - Six worked-example pointers to existing scripts.
+  - "When this protocol is not the right tool" exception list
+    (long-running continual ablations, augmentation rate sweeps,
+    multi-domain joint training).
+  Aimed at researchers adopting PCM for new cognitive-science
+  questions.
+
+- **F39 — dogfood numerical-drift verification**. Re-ran the
+  F34-dogfooded `experiments/sleep_color_holdout.py` (commit
+  `d81f00a`) at the original PAPER §7.5-color configuration
+  (5 seeds × 5 conditions, holdout-hue=5, 30 epochs × 200 steps).
+  Output:
+  - A_baseline:    1.000 / 0.000  (matches pre-dogfood)
+  - B_lms:         0.689 ± 0.048 / 0.000  (matches pre-dogfood)
+  - C_greenpeak:   1.000 / 0.000  (matches pre-dogfood)
+  - D_ripehead:    1.000 / 0.000  (matches pre-dogfood)
+  - BCD_combined:  0.711 ± 0.057 / 0.000  (matches pre-dogfood)
+  All 25 / 25 runs reproduce the original §7.5-color
+  closed-output-set ceiling (mixed_test_OOD strictly 0.000).
+  Confirms PyTorch deterministic-seeding holds across the F34
+  refactor: `pcm.diagnostics.run_causal_ablation` introduces zero
+  numerical drift versus the hand-rolled per-script orchestration
+  it replaced. The same seed produces the same per-seed metrics
+  bit-for-bit. F34 is therefore a pure clarity / abstraction win.
+
+Tests: 75 / 75 pass (no test changes for F38 / F39).
+
 ### Authority — extended
 Above plus VQ-VAE / continual-learning literature mapped to the
 four observed failure modes:
