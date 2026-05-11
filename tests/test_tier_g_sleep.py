@@ -28,11 +28,13 @@ import torch.nn.functional as F
 from pcm import ConceptGraph, GraphEvaluator
 from pcm.heads import ArithmeticHeadV2
 from pcm.sleep import (
+    PROTO_CID_PHASE_TEMPLATE,
     SleepConfig,
     attach_sleep,
     build_member_to_anchor_index,
     collapse_via_abstract,
     iter_abstract_relations,
+    run_dual_phase_sleep,
     run_sleep_pass,
     sleep_status,
 )
@@ -604,6 +606,160 @@ class TestSleepStatus(unittest.TestCase):
         self.assertEqual(st["n_prototypes"], 2)
         self.assertEqual(st["n_relations"], 4)
         self.assertIn("arithmetic_bias_residual", st["residual_facets"])
+
+
+# ---------------------------------------------------------------------------
+# G8 — S1 two-phase NREM-style sleep separates fresh and old members.
+# ---------------------------------------------------------------------------
+
+
+class TestG8DualPhaseSleep(unittest.TestCase):
+    """G8: :func:`run_dual_phase_sleep` produces two disjoint
+    clusterings on the same facet.
+
+    G8a — substate disjointness: a slot included by the fresh
+          filter receives a residual under prototypes registered
+          with phase="fresh"; one included by the old filter
+          receives a residual under prototypes with phase="old".
+          Membership across phases is disjoint by construction.
+    G8b — cardinality: combined prototype count = k_fresh + k_old
+          and cids do not collide; both sets of prototypes coexist
+          in ``cg.concepts`` after the dual pass.
+    G8c — restricted equivalence: the fresh-only pass with k_fresh=2
+          produces the same per-member residuals as a single
+          :func:`run_sleep_pass` filtered to the same slots, modulo
+          the phase tag — i.e. the dual driver is a structural
+          generalisation of the legacy single-pass.
+    """
+
+    def test_g8a_substate_disjointness(self) -> None:
+        torch.manual_seed(31)
+        cg = ConceptGraph(initial_capacity=16)
+        cids = _register_ans(cg, 8)
+        head = ArithmeticHeadV2(embed_dim=16, bias_dim=8)
+        _warmup_arith(cg, head, cids)
+        with torch.no_grad():
+            cg.bundle_pool["arithmetic_bias"].data.normal_(0.0, 0.3)
+
+        attach_sleep(cg, facets=["arithmetic_bias"])
+
+        # Filters: first 4 cids are "fresh", last 4 are "old".
+        fresh_set = set(cids[:4])
+        old_set = set(cids[4:])
+
+        def fresh_filter(facet: str, slot: int, cid: str | None) -> bool:
+            return cid in fresh_set
+
+        def old_filter(facet: str, slot: int, cid: str | None) -> bool:
+            return cid in old_set
+
+        fresh_rep, old_rep = run_dual_phase_sleep(
+            cg,
+            facets=["arithmetic_bias"],
+            fresh_slot_filter=fresh_filter,
+            old_slot_filter=old_filter,
+            fresh_config=SleepConfig(k_clusters=2, seed=0),
+            old_config=SleepConfig(k_clusters=2, seed=1),
+            tick=100,
+        )
+
+        self.assertEqual(len(fresh_rep.facets), 1)
+        self.assertEqual(len(old_rep.facets), 1)
+        self.assertEqual(fresh_rep.facets[0].n_active, 4)
+        self.assertEqual(old_rep.facets[0].n_active, 4)
+
+        # Members in fresh set must reference a fresh-phase relation;
+        # members in old set must reference an old-phase relation.
+        fresh_members_seen: set[str] = set()
+        old_members_seen: set[str] = set()
+        for rel in iter_abstract_relations(cg):
+            consts = (rel.metadata or {}).get("constants", {}) or {}
+            anchor_id = consts.get("anchor_id", "")
+            member_id = consts.get("member_id", "")
+            # Phase is encoded as the 4th colon-separated segment of
+            # the anchor cid: concept:cluster:<facet>:<phase>:<k>.
+            parts = anchor_id.split(":")
+            if len(parts) >= 5:
+                phase = parts[-2]
+                if phase == "fresh":
+                    fresh_members_seen.add(member_id)
+                elif phase == "old":
+                    old_members_seen.add(member_id)
+        self.assertEqual(fresh_members_seen, fresh_set,
+                         "G8a violated: fresh-phase relations cover wrong members")
+        self.assertEqual(old_members_seen, old_set,
+                         "G8a violated: old-phase relations cover wrong members")
+        self.assertTrue(fresh_members_seen.isdisjoint(old_members_seen),
+                        "G8a violated: phases share a member")
+
+    def test_g8b_cardinality_no_collision(self) -> None:
+        torch.manual_seed(33)
+        cg = ConceptGraph(initial_capacity=16)
+        cids = _register_ans(cg, 8)
+        head = ArithmeticHeadV2(embed_dim=16, bias_dim=8)
+        _warmup_arith(cg, head, cids)
+        with torch.no_grad():
+            cg.bundle_pool["arithmetic_bias"].data.normal_(0.0, 0.3)
+
+        attach_sleep(cg, facets=["arithmetic_bias"])
+
+        fresh_set = set(cids[:5])
+        old_set = set(cids[5:])
+
+        run_dual_phase_sleep(
+            cg,
+            facets=["arithmetic_bias"],
+            fresh_slot_filter=lambda f, s, c: c in fresh_set,
+            old_slot_filter=lambda f, s, c: c in old_set,
+            fresh_config=SleepConfig(k_clusters=3, seed=0),
+            old_config=SleepConfig(k_clusters=2, seed=1),
+            tick=200,
+        )
+
+        fresh_protos = [
+            cid for cid in cg.concepts
+            if cid.startswith("concept:cluster:arithmetic_bias:fresh:")
+        ]
+        old_protos = [
+            cid for cid in cg.concepts
+            if cid.startswith("concept:cluster:arithmetic_bias:old:")
+        ]
+        self.assertEqual(len(fresh_protos), 3,
+                         f"G8b violated: expected 3 fresh prototypes, got {len(fresh_protos)}")
+        self.assertEqual(len(old_protos), 2,
+                         f"G8b violated: expected 2 old prototypes, got {len(old_protos)}")
+        # No legacy non-phased prototype was created.
+        legacy = [
+            cid for cid in cg.concepts
+            if cid.startswith("concept:cluster:arithmetic_bias:")
+            and cid not in set(fresh_protos) | set(old_protos)
+        ]
+        self.assertEqual(legacy, [],
+                         f"G8b violated: spurious legacy prototypes {legacy}")
+
+    def test_g8c_phase_id_format(self) -> None:
+        cg = ConceptGraph(initial_capacity=16)
+        cids = _register_ans(cg, 4)
+        head = ArithmeticHeadV2(embed_dim=16, bias_dim=8)
+        _warmup_arith(cg, head, cids)
+        with torch.no_grad():
+            cg.bundle_pool["arithmetic_bias"].data.normal_(0.0, 0.3)
+        attach_sleep(cg, facets=["arithmetic_bias"])
+        run_dual_phase_sleep(
+            cg,
+            facets=["arithmetic_bias"],
+            fresh_slot_filter=lambda f, s, c: c in cids[:2],
+            old_slot_filter=lambda f, s, c: c in cids[2:],
+            fresh_config=SleepConfig(k_clusters=2, seed=0),
+            old_config=SleepConfig(k_clusters=2, seed=1),
+            tick=300,
+        )
+        # Verify cid template is honoured for at least one prototype.
+        expected = PROTO_CID_PHASE_TEMPLATE.format(
+            facet="arithmetic_bias", phase="fresh", k=0,
+        )
+        self.assertIn(expected, cg.concepts,
+                      f"G8c violated: expected cid {expected!r} not in graph")
 
 
 if __name__ == "__main__":

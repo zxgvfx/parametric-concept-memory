@@ -61,7 +61,15 @@ SLEEP_CALLER = "sleep"
 during the sleep pass."""
 
 PROTO_CID_TEMPLATE = "concept:cluster:{facet}:{k}"
+PROTO_CID_PHASE_TEMPLATE = "concept:cluster:{facet}:{phase}:{k}"
+"""S1 two-phase sleep variant — adds a ``phase`` segment to the
+prototype id so a single facet can host two independent clusterings
+(e.g. phase=``fresh`` for small-pupil substate, phase=``old`` for
+large-pupil substate, mirroring the NREM substate organisation in
+Nat Neurosci 2025 s41593-025-01886-6)."""
+
 RELATION_CID_TEMPLATE = "concept:rel:{facet}:{k}:{member}"
+RELATION_CID_PHASE_TEMPLATE = "concept:rel:{facet}:{phase}:{k}:{member}"
 RESIDUAL_FACET_TEMPLATE = "{facet}_residual"
 
 
@@ -69,11 +77,15 @@ __all__ = [
     "PROTO_KIND",
     "RELATION_KIND_HINT",
     "SLEEP_CALLER",
+    "PROTO_CID_TEMPLATE",
+    "PROTO_CID_PHASE_TEMPLATE",
     "SleepConfig",
     "FacetSleepReport",
     "SleepReport",
     "attach_sleep",
     "run_sleep_pass",
+    "run_dual_phase_sleep",
+    "SlotFilter",
     "sleep_status",
     "register_prototype",
     "register_relation",
@@ -647,6 +659,7 @@ def register_prototype(
     tick: int = 0,
     scope: str = "ABSTRACT",
     anchor_ema: float = 1.0,
+    phase: str | None = None,
 ) -> str:
     """Register an ``abstract_prototype`` node holding ``centroid``.
 
@@ -658,9 +671,20 @@ def register_prototype(
     (``new_anchor = (1-α) * old_anchor + α * centroid``,
     ``α = anchor_ema``).
 
+    ``phase`` (optional, S1) — when supplied, the prototype id is
+    formed with :data:`PROTO_CID_PHASE_TEMPLATE` so multiple
+    clusterings of the same facet (e.g. ``phase="fresh"`` and
+    ``phase="old"`` from :func:`run_dual_phase_sleep`) coexist
+    without slot collisions.
+
     Returns the prototype concept id.
     """
-    proto_id = PROTO_CID_TEMPLATE.format(facet=str(facet), k=int(k))
+    if phase is None:
+        proto_id = PROTO_CID_TEMPLATE.format(facet=str(facet), k=int(k))
+    else:
+        proto_id = PROTO_CID_PHASE_TEMPLATE.format(
+            facet=str(facet), phase=str(phase), k=int(k),
+        )
     centroid_d = centroid.detach()
     if proto_id in cg.concepts:
         slot = cg.cid_to_slot[proto_id]
@@ -706,6 +730,7 @@ def register_relation(
     mode: str = "add",
     tick: int = 0,
     scope: str = "ABSTRACT",
+    phase: str | None = None,
 ) -> str:
     """Register a cookable abstract-relation subgraph.
 
@@ -713,17 +738,30 @@ def register_relation(
     on ``facet + "_residual"``), then combines them via
     ``concept.relation_apply(mode)``.
 
+    ``phase`` (optional, S1) — when supplied, the relation cid uses
+    :data:`RELATION_CID_PHASE_TEMPLATE`, allowing the same
+    ``(facet, k, member)`` triple to coexist for different sleep
+    phases (fresh vs old) without collision.
+
     Returns the relation concept id (idempotent on re-call).
     """
     if anchor_id not in cg.concepts:
         raise KeyError(f"anchor_id {anchor_id!r} not in graph")
     if member_id not in cg.concepts:
         raise KeyError(f"member_id {member_id!r} not in graph")
-    rel_id = RELATION_CID_TEMPLATE.format(
-        facet=str(facet),
-        k=anchor_id.split(":")[-1],
-        member=member_id.split(":")[-1],
-    )
+    if phase is None:
+        rel_id = RELATION_CID_TEMPLATE.format(
+            facet=str(facet),
+            k=anchor_id.split(":")[-1],
+            member=member_id.split(":")[-1],
+        )
+    else:
+        rel_id = RELATION_CID_PHASE_TEMPLATE.format(
+            facet=str(facet),
+            phase=str(phase),
+            k=anchor_id.split(":")[-1],
+            member=member_id.split(":")[-1],
+        )
     if rel_id in cg.concepts:
         return rel_id
     res_facet = RESIDUAL_FACET_TEMPLATE.format(facet=str(facet))
@@ -954,8 +992,14 @@ def _phase_c_register(
     assignments: torch.Tensor,
     cfg: SleepConfig,
     tick: int,
+    phase: str | None = None,
 ) -> tuple[list[str], list[str], list[float], list[float], list[int]]:
-    """Phase C — register prototype + residual + relation nodes."""
+    """Phase C — register prototype + residual + relation nodes.
+
+    ``phase`` (optional, S1) — propagated to :func:`register_prototype`
+    and :func:`register_relation` so the resulting prototype /
+    relation cids embed the phase tag and don't collide with another
+    phase's clustering on the same facet."""
     k = centroids.shape[0]
     res_facet = RESIDUAL_FACET_TEMPLATE.format(facet=facet)
     proto_ids: list[str] = []
@@ -980,6 +1024,7 @@ def _phase_c_register(
             tick=tick,
             scope=cfg.abstract_scope,
             anchor_ema=cfg.anchor_ema,
+            phase=phase,
         )
         proto_ids.append(proto_id)
         centroid_norms.append(float(centroids[c].norm().item()))
@@ -1009,6 +1054,7 @@ def _phase_c_register(
             mode=cfg.relation_mode,
             tick=tick,
             scope=cfg.abstract_scope,
+            phase=phase,
         )
         rel_ids.append(rel_id)
     return proto_ids, rel_ids, centroid_norms, residual_rms, member_counts
@@ -1212,3 +1258,143 @@ def run_sleep_pass(
 
     cg._sleep_last_tick = int(tick)
     return report
+
+
+# ---------------------------------------------------------------------------
+# S1 — two-phase NREM-style sleep.
+# ---------------------------------------------------------------------------
+
+
+SlotFilter = Callable[[str, int, str | None], bool]
+"""Predicate ``(facet, slot, member_cid) -> include?`` used by
+:func:`run_dual_phase_sleep` to assign each active slot to either
+the *fresh* (small-pupil) or *old* (large-pupil) substate."""
+
+
+def run_dual_phase_sleep(
+    cg: "ConceptGraph",
+    *,
+    facets: Iterable[str],
+    fresh_slot_filter: SlotFilter,
+    old_slot_filter: SlotFilter,
+    fresh_config: SleepConfig | None = None,
+    old_config: SleepConfig | None = None,
+    fresh_phase: str = "fresh",
+    old_phase: str = "old",
+    tick: int = 0,
+    force_recluster: bool = False,
+) -> tuple[SleepReport, SleepReport]:
+    """S1 — NREM-style two-phase sleep separating new and old memories.
+
+    Mirrors the substate organisation reported in
+    *Nat Neurosci 2025* (s41593-025-01886-6): during NREM, ~1-min
+    pupil oscillations split sharp-wave ripple replay into:
+
+    * **small-pupil** substate — recently learned memories
+      preferentially reactivate; disrupting ripples here impairs
+      *new* memory consolidation but spares old.
+    * **large-pupil** substate — older memories reactivate;
+      disrupting ripples here has no effect on new memories.
+
+    PCM operationalisation: callers supply two slot filters
+    selecting "fresh" and "old" members of each facet (e.g. by
+    introduction tick, by which task domain registered them, etc).
+    Two independent k-means passes are run, each writing its own
+    set of prototype + relation nodes tagged with ``fresh_phase``
+    and ``old_phase`` respectively (defaulting to ``"fresh"`` and
+    ``"old"``). Residuals on the shared residual facet are
+    written by each pass for its own member set, so a member only
+    ever appears in **one** clustering at a time.
+
+    Falsifiability (G8 invariants, see ``test_tier_g_sleep.py``):
+
+    * **G8a (substate disjointness)**: a slot included in the
+      fresh pass receives no residual from the old pass and vice
+      versa.
+    * **G8b (cardinality)**: combined prototype count =
+      ``k_fresh + k_old`` on each facet; cids do not collide.
+    * **G8c (legacy compatibility)**: when both filters select
+      every active slot and ``fresh_phase=None``, the result is
+      identical (per-slot bit-equal) to a single
+      :func:`run_sleep_pass` invocation with the merged ``cfg``.
+
+    Returns ``(fresh_report, old_report)``. Each follows the
+    same :class:`SleepReport` schema as :func:`run_sleep_pass`.
+    """
+    if not getattr(cg, "sleep_enabled", False):
+        raise RuntimeError(
+            "run_dual_phase_sleep: pcm.sleep.attach_sleep(cg) must be "
+            "called first"
+        )
+    fresh_cfg = fresh_config if fresh_config is not None else SleepConfig()
+    old_cfg = old_config if old_config is not None else SleepConfig()
+
+    candidate_facets = list(dict.fromkeys(str(f) for f in facets))
+
+    fresh_report = SleepReport(tick=int(tick))
+    old_report = SleepReport(tick=int(tick))
+
+    def _run_phase(
+        phase_name: str | None,
+        cfg: SleepConfig,
+        slot_filter: SlotFilter,
+        report: SleepReport,
+    ) -> None:
+        for facet in candidate_facets:
+            if facet not in cg.bundle_pool:
+                report.skipped_facets.append(facet)
+                continue
+            all_active = _active_slots_for_facet(cg, facet)
+            kept: list[int] = []
+            for s in all_active:
+                cid = cg.slot_to_cid.get(s)
+                if slot_filter(facet, s, cid):
+                    kept.append(s)
+            if len(kept) < 2:
+                report.skipped_facets.append(facet)
+                continue
+            res_facet = RESIDUAL_FACET_TEMPLATE.format(facet=facet)
+            already_clustered = (
+                res_facet in cg.bundle_pool
+                and any(
+                    SLEEP_CALLER in cg._consumed_by_by_slot.get(s, {}).get(
+                        res_facet, set()
+                    )
+                    for s in kept
+                )
+            )
+            if already_clustered and not force_recluster:
+                report.skipped_facets.append(facet)
+                continue
+            with torch.no_grad():
+                rows = cg.bundle_pool[facet].data[kept].clone()
+            k = _resolve_k(len(kept), cfg.k_clusters)
+            centroids, assignments = _kmeans(rows, k, cfg=cfg)
+            sil = _silhouette_score(rows, assignments, cfg.distance)
+            proto_ids, _rel_ids, c_norms, r_rms, m_counts = _phase_c_register(
+                cg,
+                facet=facet,
+                active_slots=kept,
+                rows=rows,
+                centroids=centroids,
+                assignments=assignments,
+                cfg=cfg,
+                tick=tick,
+                phase=phase_name,
+            )
+            report.facets.append(
+                FacetSleepReport(
+                    facet=facet,
+                    n_active=len(kept),
+                    k_clusters=k,
+                    silhouette=sil,
+                    centroid_norms=c_norms,
+                    residual_rms=r_rms,
+                    member_counts=m_counts,
+                )
+            )
+
+    _run_phase(fresh_phase, fresh_cfg, fresh_slot_filter, fresh_report)
+    _run_phase(old_phase, old_cfg, old_slot_filter, old_report)
+    cg._sleep_last_tick = int(tick)
+    return fresh_report, old_report

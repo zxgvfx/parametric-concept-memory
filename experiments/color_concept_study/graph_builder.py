@@ -15,6 +15,7 @@ __all__ = [
     "build_color_graph",
     "make_random_orthogonal_centroids",
     "make_lms_like_centroids",
+    "make_cone_opponent_centroids",
     "_apply_shuffle",
 ]
 
@@ -90,6 +91,69 @@ def make_lms_like_centroids(
         S_resp = max(0.0, math.cos(angle - a_S))
         c = L_resp * cones[0] + M_resp * cones[1] + S_resp * cones[2]
         centroids[i] = c
+    centroids = F.normalize(centroids, dim=-1)
+    return centroids.to(DEVICE)
+
+
+def make_cone_opponent_centroids(
+    K: int, dim: int, seed: int,
+    *, peaks: tuple[int, int, int] = (0, 4, 8),
+) -> torch.Tensor:
+    """PAPER §16 (S5) — cone-opponent centroids ("infant prior").
+
+    Variant of :func:`make_lms_like_centroids` that projects the
+    three cone responses onto **two opponent axes** plus a
+    luminance axis, rather than three independent cone axes:
+
+    * **R-G axis** ← (L − M) / 2
+    * **Y-B axis** ← ((L + M)/2 − S) / 2
+    * **Lum axis** ← (L + M + S) / 3
+
+    This more faithfully reflects the **prelinguistic categorical
+    perception** observed in 5–7-month-old infants by NIRS (Yang
+    et al. 2016 *PNAS*; Skelton et al. 2017) and the cone-opponent
+    mechanism that underlies it (Solomon & Lennie 2007 *Nat Rev
+    Neurosci*; Conway et al. 2018), which carves the hue ring into
+    **four primary regions** (red / green / yellow / blue) rather
+    than three additive primaries (R / G / B).
+
+    Layout: same ``(K, dim)`` shape on ``DEVICE`` as
+    :func:`make_lms_like_centroids`, drop-in replaceable. Three
+    cone responses share the same ``peaks`` argument so this
+    function is one-line swap with the LMS variant.
+
+    Falsifiability: under opponent centroids the **task** is still
+    fully cyclic, so any post-training emergence of *four* anchor
+    clusters (vs three under LMS) is attributable solely to the
+    centroid prior, not to gradient asymmetry.
+    """
+    if K < 3:
+        raise ValueError(
+            f"cone-opponent centroids require K >= 3, got {K}"
+        )
+    g = torch.Generator().manual_seed(seed)
+    A = torch.randn(dim, 3, generator=g)
+    Q, _ = torch.linalg.qr(A)
+    rg_axis = Q.t()[0]
+    yb_axis = Q.t()[1]
+    lum_axis = Q.t()[2]
+
+    p_L, p_M, p_S = peaks
+    centroids = torch.zeros(K, dim)
+    for i in range(K):
+        angle = 2 * math.pi * i / K
+        a_L = 2 * math.pi * (p_L % K) / K
+        a_M = 2 * math.pi * (p_M % K) / K
+        a_S = 2 * math.pi * (p_S % K) / K
+        # Linear (signed) cone responses; opponent processing
+        # uses signed differences so we keep the sign here too.
+        L_resp = math.cos(angle - a_L)
+        M_resp = math.cos(angle - a_M)
+        S_resp = math.cos(angle - a_S)
+        rg = (L_resp - M_resp) / 2.0
+        yb = ((L_resp + M_resp) / 2.0 - S_resp) / 2.0
+        lum = max(0.0, (L_resp + M_resp + S_resp) / 3.0)
+        centroids[i] = rg * rg_axis + yb * yb_axis + lum * lum_axis
     centroids = F.normalize(centroids, dim=-1)
     return centroids.to(DEVICE)
 

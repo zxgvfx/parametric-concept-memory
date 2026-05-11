@@ -75,6 +75,12 @@ PERCEPTUAL_PRIORS = {
     # hues (cyan/blue). On a 12-hue ring at 60° spacing, this is
     # {0, 2, 4, 6, 8, 10}.
     "WarmCool6": frozenset({0, 2, 4, 6, 8, 10}),
+    # Hering 4 unique hues (red/yellow/green/blue) — the four
+    # primaries cone-opponent processing predicts. On a 12-hue
+    # ring this maps to {R=0, Y=2, G=4, B=8}. Spacings 2/2/4/4
+    # are deliberately *not* equidistant; equi tests will fail
+    # for this prior, that's the point of S5.
+    "Hering4": frozenset({0, 2, 4, 8}),
 }
 
 
