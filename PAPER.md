@@ -1294,6 +1294,127 @@ in a way that cognitive science routinely conflates.
 
 ![F13 §7.5 length extrapolation: 5 conditions × {in-range OOD, length-100 OOD}, 5 seeds; A/B/C strictly at chance, D/BCD give a statistically detectable but small lift](./docs/figures/F13_number_extrapolate.png)
 
+### 7.5-space  Spatial analogue: 2-D length extrapolation reveals an input-distribution interaction ceiling
+
+§7.5 number length-OOD shows an *input-side* ceiling (A/B/C/D/BCD
+all near chance on length-100 OOD). §7.5-color hue holdout (below)
+shows an *output-side* ceiling (25/25 strictly 0.000). The space
+domain provides a third dimension: **2-D length extrapolation on
+a grid**, which reveals a new ceiling type — *input-distribution
+interaction*.
+
+**Setup** (`experiments/sleep_space_extrapolate.py`):
+
+- Concept registry: 7 × 7 = 49 cells (all registered).
+- `MoveHead` only trains on move triples whose **both** cells lie
+  in the 5 × 5 inner subgrid (r, c < 5).
+- `RowIndexHead` (D / BCD) sees the **full** 7 × 7 inventory, so
+  outer-ring cells' ``motion_bias`` rows still receive
+  row-identity gradient.
+- Three test splits:
+  - `test_random_in_range`: random hold-out of inner 5 × 5
+    triples (baseline interpolation).
+  - `test_mixed_OOD`: triples where exactly one of (a, b) is on
+    the outer ring (input-distribution mismatch).
+  - `test_outer_OOD`: triples where **both** (a, b) are on the
+    outer ring (pure length OOD).
+
+**Three causal layers**:
+
+| Layer | Spatial operationalisation |
+|---|---|
+| **B** Hardware | `make_cardinal_axis_centroids`: ``n_rows + n_cols = 14`` orthogonal axis cones; cell (r, c)'s centroid = cone[r] + cone[``n_rows`` + c]. Mirrors the place-cell × grid-cell factorisation in mammalian spatial cognition (Hafting et al. 2005 *Nature*). |
+| **C** Statistics | `center_bias_weights`: per-cell sampling Gaussian over Chebyshev distance to grid centre, modelling natural movement frequency in bounded environments. |
+| **D** Task | `RowIndexHead`: single-input 7-class classifier of cell row, trained on the full inventory; provides axis-aligned gradient to outer-ring bundle rows without exposing the move task's per-pair labels. |
+
+**5 condition × 5 seed = 25 runs** (chance ≈ 1/5 = 0.200):
+
+| Condition | in-range OOD ± std | mixed-OOD ± std | outer-OOD ± std |
+|---|---|---|---|
+| **A** baseline | 0.453 ± 0.264 | **0.000 ± 0.000** | 0.263 ± 0.005 |
+| **B** + cardinal centroid | **0.840 ± 0.121** | **0.000 ± 0.000** | **0.570 ± 0.020** |
+| **C** + center-bias sampling | 0.587 ± 0.218 | **0.000 ± 0.000** | 0.261 ± 0.000 |
+| **D** + row-index head | 0.667 ± 0.170 | **0.000 ± 0.000** | 0.498 ± 0.103 |
+| **B+C+D** combined | **0.920 ± 0.087** | **0.000 ± 0.000** | **0.572 ± 0.038** |
+
+**Three core observations**:
+
+1. **outer-OOD significantly above chance**: BCD reaches 0.572 ≈
+   2.9 × chance (0.200), in stark contrast with §7.5 number
+   length-OOD's +1.1 pp above chance. Reason: the space task
+   has strong row × col factorised structure, so the cardinal
+   centroid (B) directly gives outer cells the correct relative
+   position, letting MoveHead infer direction from two outer
+   bundles even though it never trained on them.
+
+2. **mixed-OOD strictly 0.000 (25/25)** reveals a new ceiling
+   type — **input-distribution interaction**. Diagnosis:
+   ``MoveHead``'s ``fc1`` consumes ``concat(bundle_a, bundle_b)``;
+   training only ever provides this concat from the inner × inner
+   joint distribution. At test the (inner, outer) pair lands in
+   inner × outer joint distribution, which never appeared in
+   training — even though each individual cell's bundle row has
+   been prior-injected (B places outer cells on correct
+   axes), the *joint* never saw gradient and ``fc1``'s mapping
+   there is arbitrary.
+
+3. **B ≈ D > C as dominant pattern**: B (cardinal centroid,
+   0.570) and D (row-index, 0.498) are both strong; B slightly
+   wins. Together with §6.9 (phoneme: B-dominant) and §6.8 / §7.4
+   (colour / number: D-dominant), space sits in the middle —
+   consistent with the task-symmetry × dominant-layer principle:
+   5-way direction classification has a partial cyclic group
+   (the four cardinal directions) plus a categorical "same"
+   class, plus a row × col factorisation — the symmetry profile
+   is intermediate, and so is the dominant-layer split.
+
+**Unified ceiling taxonomy across three domains**:
+
+| Domain | A baseline | BCD | Δ over chance | Ceiling type |
+|---|---|---|---|---|
+| **Number** length-100 | 0.051 ± 0.000 | 0.062 ± 0.003 | **+1.1 pp** | input-side (bundle row not task-trained) |
+| **Colour** hue holdout (below) | 0.000 ± 0.000 | 0.000 ± 0.000 | **−8.3 pp** (below chance) | output-side (head never points at the held-out class) |
+| **Space** outer-OOD | 0.263 ± 0.005 | **0.572 ± 0.038** | **+37.2 pp** | partial — B drives transfer + mixed-distribution ceiling |
+| **Space** mixed-OOD | 0.000 ± 0.000 | 0.000 ± 0.000 | **−20.0 pp** | input-distribution interaction (new) |
+
+Number length-OOD and colour hue holdout each isolate **one**
+PCM ceiling (input-side / output-side). The space domain
+exhibits **both at once with a finer structure**: cardinal
+centroids let PCM cross the input-side ceiling on *symmetric*
+OOD (outer-OOD: both cells from the same OOD distribution),
+but it still hits an *asymmetric*-OOD ceiling on mixed pairs.
+
+Refined taxonomy:
+
+```
+Input-side       (numbers):    bundle never trained; head input absent
+Output-side      (colours):    head output class never trained; absent on argmax
+Symmetric-OOD    (space):      fc1 partial-transfer when both inputs share OOD distribution
+Asymmetric-OOD   (space):      fc1 strictly fails on mixed input distributions
+```
+
+The third and fourth types are unique to the space domain
+because it is the only setting with a genuine *two-input*
+muscle whose two inputs play asymmetric roles (the colour mix
+head is also two-input but its task is order-symmetric, which
+collapses the asymmetric-OOD case). This gives D93a follow-up
+work a concrete target: **joint-distribution-aware bundle
+synthesis**, not merely per-concept slot generators, is needed
+to cross the mixed-OOD ceiling.
+
+**Consistency with PAPER §3.6 / §9 declared boundaries**: §3.6
+states the D91/D92 limit; §9 second item further notes
+"ground-truth concept IDs given, not discovered". The space
+mixed-OOD = 0 result extends this: even when concept IDs are
+registered, priors are injected, and a single-input auxiliary
+head has been trained, the **joint-distribution coverage of a
+two-input muscle** remains a separate architectural boundary.
+§7.5 / §7.5-color / §7.5-space jointly provide the most
+complete diagnostic of where PCM's static-bundle architecture
+runs out of expressive power.
+
+![F16 §7.5-space spatial length extrapolation: 5 conditions × 3 splits × 5 seeds; B + BCD reach ~3× chance on outer-OOD, mixed-OOD strict 0/25 reveals input-distribution ceiling](./docs/figures/F16_space_extrapolate.png)
+
 ### 7.5-color  Colour-domain analogue: hue holdout reveals the closed-output-set ceiling
 
 §7.5 number's ceiling is "chance level + 1.1 pp". The colour

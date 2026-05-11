@@ -282,6 +282,76 @@ and the [Keep a Changelog](https://keepachangelog.com/) conventions.
   Together with the §7.5 / §7.5-color extrapolation ceilings,
   this gives the falsifiable testbed claim its strongest
   triple-domain support.
+- **PAPER §7.5-space — spatial 2-D length extrapolation reveals
+  a new input-distribution-interaction ceiling type**.
+  New `experiments/space_cardinal_priors.py` (cardinal-axis
+  cones, center-bias weights, RowIndexHead),
+  `experiments/sleep_space_extrapolate.py` (5-condition × 5-seed
+  harness on a 7×7 grid, training MoveHead only on the inner 5×5
+  sub-grid, three test splits), and
+  `experiments/render_paper_figures/F16_space_extrapolate.py`.
+  5-condition × 5-seed = 25 runs at chance ≈ 0.200:
+  - **A baseline** outer-OOD = 0.263 ± 0.005 (≈ chance).
+  - **B cardinal centroid alone** outer-OOD = 0.570 ± 0.020
+    (≈ 2.9 × chance). **B is the dominant single layer for
+    space**, mirroring the §6.9 phoneme finding.
+  - **D row-index head alone** outer-OOD = 0.498 ± 0.103.
+  - **B+C+D combined** outer-OOD = 0.572 ± 0.038 — small lift
+    over B alone, suggesting B already captures most of the
+    transferable cardinal-axis information.
+  - **mixed-OOD strictly 0.000 in 25 / 25 runs**, well below
+    the 0.200 chance baseline. This is a new ceiling type
+    distinct from §7.5 input-side and §7.5-color output-side:
+    MoveHead's fc1 receives `concat(bundle_a, bundle_b)`,
+    trained only on the inner × inner joint distribution; the
+    (inner, outer) joint distribution is OOD even when each
+    individual cell's bundle is prior-injected. Term:
+    **input-distribution interaction ceiling**, unique to
+    two-input muscles with asymmetric input roles.
+  - Three-domain unified ceiling taxonomy (input-side / 
+    output-side / symmetric-OOD / asymmetric-OOD) added to
+    PAPER §7.5-space.
+- **PAPER §7.5-space dominant-layer placement**: B ≈ D > C,
+  intermediate between phoneme (B-dominant, orthogonal
+  categorical) and colour / number (D-dominant, cyclic /
+  translational). Consistent with the task-symmetry × 
+  dominant-layer principle: 5-class direction has a partial
+  cyclic group + categorical "same" + row × col factorisation.
+
+- **`pcm.diagnostics` — formal causal-ablation protocol API**.
+  New module `pcm/diagnostics.py` packages the §6.6 / §6.7 /
+  §6.8 / §6.9 / §7.4 / §7.5 / §7.5-color / §7.5-space
+  five-condition × N-seed pattern as a reusable abstraction.
+  Public surface:
+  - `CAUSAL_LAYERS = ("B", "C", "D")` — canonical layer order.
+  - `AblationLayers` — frozen dataclass with B/C/D flags and
+    `is_active(layer)` helper, accepts `None / False / True / 
+    str` activation values.
+  - `AblationCondition` — named (B, C, D) condition with
+    `to_dict()` for JSON serialisation.
+  - `DEFAULT_CONDITIONS` — the five canonical conditions
+    (A_baseline, B_prior, C_statistics, D_task, BCD_combined).
+  - `CausalAblationProtocol` / `run_causal_ablation` — driver
+    that orchestrates 5 × N runs and produces a summary dict
+    in the same `config / by_condition / per_seed / mean / std`
+    layout already used by all bundled experiment scripts and
+    F11–F16 figure renderers.
+  - `summarise_per_seed` — NaN-safe stats helper.
+  Five new unit tests (D1–D5) in `tests/test_diagnostics.py`
+  cover the canonical condition shape, layer activation
+  semantics, driver-invocation contract, summary-dict layout,
+  and statistical helper behaviour. The module is **purely
+  orchestration**: it does not assume any specific PCM
+  architecture, head shape, or evaluation metric, and the
+  bundled domain-specific experiment scripts continue to work
+  unchanged. Future work that wants to add a new domain to
+  the falsifiable causal-ablation protocol can now do so in
+  ~50 lines, by writing a domain `run_one(seed, layers, **kw)`
+  callback and passing it to `run_causal_ablation`.
+
+Tests: 75 / 75 pass (63 prior + 12 new diagnostics smoke). No
+regressions in Tier-A grow / Tier-B gate / Tier-C peer / Tier-D
+cook bit-identity; G1–G7 invariants still hold.
 
 ### Authority — extended
 Above plus VQ-VAE / continual-learning literature mapped to the

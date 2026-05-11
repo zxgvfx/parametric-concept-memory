@@ -731,6 +731,72 @@ PCM 会诱导出解决任务所足够的 **pairwise geometry**（加法为线性
 
 ![F13 §7.5 length extrapolation：5 conditions × {in-range OOD, length-100 OOD}, 5 seeds; A/B/C 严格在 chance, D / BCD 给出 statistically detectable 但小的提升](./docs/figures/F13_number_extrapolate.png)
 
+### 7.5-space 空间域对应：2-D 格点上的 length extrapolation 与 input-distribution ceiling
+
+§7.5 数字 length-OOD 给出 input-side ceiling（A/B/C/D/BCD 在 length-100 上接近 chance），§7.5-color hue holdout 给出 output-side ceiling（25/25 严格 0.000）。空间域提供第三个维度：**2-D 格点上的 length extrapolation**，揭示一种新的 ceiling 类型——*input-distribution interaction*。
+
+**Setup**（脚本：`experiments/sleep_space_extrapolate.py`）：
+
+- Concept registry：7×7 = 49 cells（全部注册）。
+- `MoveHead` 训练时只见 5×5 = 25 cells 内部的 move triples（坐标 r, c < 5）。
+- `RowIndexHead`（D / BCD condition）见**全部** 7×7 inventory，所以 outer-ring cells 的 `motion_bias` 行也接收 row-identity 梯度。
+- 三个 test split：
+  - `test_random_in_range`：5×5 内的随机 hold-out（baseline interpolation）
+  - `test_mixed_OOD`：(a, b) 中**恰好一个**在 outer ring（input-distribution mismatch）
+  - `test_outer_OOD`：(a, b) **都**在 outer ring（pure length OOD）
+
+**三层因果操作化**：
+
+| 层 | 空间域操作化 |
+|---|---|
+| **B 硬件先验** | `make_cardinal_axis_centroids`：n_rows + n_cols = 14 个正交 axis cones；cell (r, c) centroid = cone[r] + cone[n_rows + c]。模拟哺乳动物空间认知里 place-cell × grid-cell 的因子化（[Hafting et al. 2005 *Nature*]） |
+| **C 生态统计** | `center_bias_weights`：训练 cell 按 chebyshev 距离边缘的高斯分布采样，模拟有界环境中的自然移动频率分布 |
+| **D 任务驱动** | `RowIndexHead`：单输入 7-class 分类 cell 的 row 索引，在 full inventory 上训，给 outer cells 的 bundle row 一个轴对齐 gradient（无 task ground-truth 暴露） |
+
+**5 condition × 5 seed = 25 runs**（chance ≈ 1/5 = 0.200）：
+
+| 条件 | in-range OOD ± std | mixed-OOD ± std | outer-OOD ± std |
+|---|---|---|---|
+| **A** baseline | 0.453 ± 0.264 | **0.000 ± 0.000** | 0.263 ± 0.005 |
+| **B** + cardinal centroid | **0.840 ± 0.121** | **0.000 ± 0.000** | **0.570 ± 0.020** |
+| **C** + center-bias sampling | 0.587 ± 0.218 | **0.000 ± 0.000** | 0.261 ± 0.000 |
+| **D** + row-index head | 0.667 ± 0.170 | **0.000 ± 0.000** | 0.498 ± 0.103 |
+| **B+C+D** combined | **0.920 ± 0.087** | **0.000 ± 0.000** | **0.572 ± 0.038** |
+
+**三个核心观察**：
+
+1. **outer-OOD 显著超 chance**：BCD 的 outer-OOD = 0.572 ≈ 2.9× chance（0.200），与 §7.5 数字 length-OOD（+1.1pp above chance）形成鲜明对比。原因：space 任务有强 row/col 因子化结构，B 的 cardinal centroid 直接给 outer cells 正确的相对位置，让 head 即使在未训练 cell 上也能从两个 outer bundle 推断方向。
+
+2. **mixed-OOD = 0.000 严格 universal**（25/25）：揭示一种**新型 ceiling—— input-distribution interaction**。具体诊断：`MoveHead` 的 fc1 layer 接收 `concat(bundle_a, bundle_b)`，训练时这个 concat 总是来自 inner × inner joint distribution。测试 `(inner, outer)` pair 时，concat 落在 inner × outer joint distribution——即使每个 cell 的 bundle 单独都被 prior 注入（B 给 outer cells 正确 axis），joint distribution 在训练中**从未出现过**，fc1 在该区域上学到的映射任意。
+
+3. **B ≈ D > C 的 dominant pattern**：space 域上 B（cardinal centroid，0.570）和 D（row index，0.498）都是强信号，B 略胜。这与 §6.9 phoneme（B-dominant，articulator centroid 几乎完美 transfer）和 §6.8 / §7.4（colour / number 都 D-dominant）形成中间情况，符合 task-symmetry × dominant-layer 原则的预测：**direction classification 介于 cyclic（colour mix）与 orthogonal categorical（phoneme V/M/P）之间**——5-class direction 的对称群部分由 grid 的 row × col 轴决定（categorical），部分由 cardinal direction 集决定（partial cyclic）。
+
+**三个域 length-OOD ceiling 的统一对照表**：
+
+| 域 | A baseline | BCD | Δ over chance | Ceiling 类型 |
+|---|---|---|---|---|
+| **数字** length-100 | 0.051 ± 0.000 | 0.062 ± 0.003 | **+1.1pp** | input-side (bundle row 缺训练) |
+| **颜色** hue holdout | 0.000 ± 0.000 | 0.000 ± 0.000 | **−8.3pp** (低于 chance) | output-side (head 不输出 holdout class) |
+| **空间** outer-OOD | 0.263 ± 0.005 | **0.572 ± 0.038** | **+37.2pp** | partial — B 强 transfer + mixed-distribution ceiling |
+| **空间** mixed-OOD | 0.000 ± 0.000 | 0.000 ± 0.000 | **−20pp** | input-distribution interaction (新发现) |
+
+数字 length-OOD 与颜色 hue holdout 给出 PCM 的两个**单一变量** ceiling（input-side / output-side）。空间域 outer-OOD + mixed-OOD 同时存在，给出**复合架构 ceiling**：cardinal centroid 让 PCM 在 *symmetric* OOD 上获得部分 transfer（outer-OOD：两个未见 cell 都来自相同 OOD distribution），但在 *asymmetric* OOD 上仍然失效（mixed-OOD：head 的 fc1 从未在该 joint distribution 训过）。
+
+这给 PCM 一个**更精细的 ceiling taxonomy**：
+
+```
+Input-side ceiling (numbers):     bundle row 缺训, head 单 input 也无效
+Output-side ceiling (colours):    head 输出空间 closed, prior 注入也不能突破
+Symmetric-OOD ceiling (space):    fc1 在 symmetric joint distribution 上能 partial transfer
+Asymmetric-OOD ceiling (space):   fc1 在 mixed joint distribution 上严格失效
+```
+
+第三、第四类是空间域独有的——因为它是唯一一个 `head(a, b)` *双 input* 任务（colour mixing 表面上也是双 input 但其 task symmetry 让两个 input 角色对称）。这给后续 D93a 工作一个具体的研究方向：**joint-distribution-aware bundle synthesis** 才能跨 mixed-OOD ceiling，而不仅仅是 per-concept 的 slot generators。
+
+**与 PAPER §3.6 / §9 已声明边界的一致性**：§3.6 已经声明 PCM 的 D91/D92 限制；§9 第二项进一步指明 "ground-truth concept ID 给定，而非发现"。space domain 的 mixed-OOD = 0 进一步揭示，即使 concept ID 已注册、prior 已注入、单输入辅助 head 已训过，**双 input head 的 joint-distribution coverage** 仍然是一个独立的架构边界——这是 §7.5 / §7.5-color / §7.5-space 三个 length-OOD 实验联合提供的最完整诊断。
+
+![F16 §7.5-space 空间 length extrapolation：5 conditions × 3 splits × 5 seeds; B + BCD 在 outer-OOD 上接近 3× chance, mixed-OOD 全部 0/25 揭示 input-distribution ceiling](./docs/figures/F16_space_extrapolate.png)
+
 ### 7.5-color 颜色域对应：hue holdout 给出更清晰的 closed-output-set 边界
 
 §7.5 数字 length-OOD 给的 ceiling 是「chance level + 1.1 pp」。颜色域可以做一个更清晰的对应实验：**hold out 一个 target hue**（即所有 `mix(a, b) → c=5` 的 triple 都不在训练集中），然后测 5 condition × 5 seed 上 head 是否能预测 hue 5（脚本：`experiments/sleep_color_holdout.py`）。

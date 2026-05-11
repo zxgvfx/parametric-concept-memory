@@ -19,7 +19,7 @@ Public API::
     ContextualizedConcept              — ephemeral collapse handle
     config                              — capacity / grow / gate defaults
 """
-from . import config, dna_ops, gate, graph_eval, peer, sleep
+from . import config, diagnostics, dna_ops, gate, graph_eval, peer, sleep
 from .concept_graph import ConceptGraph, ConceptNode
 from .graph_eval import (
     PARAMETRIC_KIND,
@@ -47,6 +47,7 @@ __all__ = [
     "SubgraphEvalError",
     "PARAMETRIC_KIND",
     "config",
+    "diagnostics",
     "dna_ops",
     "gate",
     "graph_eval",
