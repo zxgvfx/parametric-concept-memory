@@ -16,6 +16,9 @@ The module exports two parallel sets of public symbols:
 """
 from .arithmetic_head_v2 import ArithmeticHeadV2
 from .comparison_head import ComparisonHead
+from .v2_dual_channel import (
+    DualChannelPairHead, SlotIdentityAuxHead, pair_collapse_and_forward,
+)
 from .cook_factory import (
     HeadAsBackbone,
     MLPBackbone,
@@ -46,4 +49,7 @@ __all__ = [
     "build_arith_v2_cook",
     "build_comparison_cook",
     "build_numerosity_classifier_cook",
+    # PCM v2 — pair-input dual-channel + RPE
+    "DualChannelPairHead", "SlotIdentityAuxHead",
+    "pair_collapse_and_forward",
 ]
