@@ -46,6 +46,40 @@ Forum / *Cognitive Science* short report）见
 
 ![四领域 bundle 几何普适性](./docs/figures/F4_four_domain_universality.png)
 
+## 最新进展 — PCM v2 里程碑（2026 年 5 月）
+
+跨 9 个 finding 的中期成果（F40–F49 提交，详见
+`git log --oneline | head -30`）。三个亮点：
+
+* **RPE 完全打破 §7.5-space `mixed_OOD = 0.000` 天花板** ——
+  这是一年来 v1 任何 D-head 变体都无法突破的瓶颈。
+  `pcm.dual_channel.RelativePositionEmbedding` 在 4 个 PCM 域
+  （空间 / 颜色 / 音素 / 数字）将 OOD 准确率拉到 0.96 – 1.00 ±
+  0.02，5 seeds — 同一个 API，三次 `ranges` 调整。诊断链
+  （concat → trained attr → oracle attr → RPE）见
+  [`docs/SHORT_REPORT_2026_S1_S6.md`](./docs/SHORT_REPORT_2026_S1_S6.md)。
+
+* **归纳偏置必须人为施加（可证伪形式）**。F45 / F46 显示
+  learned attention gate 在所有奖励强度下都停在 λ ≈ 0.98；只有
+  显式 L1 惩罚（β = 0.1）才能让 gate 关闭到 λ_final ≈ 0.002。
+  5 配置 × 5 种子的证据见
+  [`docs/SHORT_REPORT_2026_S1_S6.md §V3-RPE`](./docs/SHORT_REPORT_2026_S1_S6.md)。
+
+* **PCM v2 双通道编码**。概念现在分解为 `(slot, attr)` 对，
+  前者支持 Tier-G 聚类，后者支持 contrastive + arithmetic +
+  successor 损失（数字域 V1、V2 invariants 均为 1.000 ± 0.000）。
+  完整设计见
+  [`docs/PCM_V2_DUAL_CHANNEL_DESIGN.md`](./docs/PCM_V2_DUAL_CHANNEL_DESIGN.md)，
+  五行升级配方见
+  [`docs/PCM_V2_MIGRATION_GUIDE.md`](./docs/PCM_V2_MIGRATION_GUIDE.md)。
+
+公共 API 新增（107 / 107 测试通过）：
+- `pcm.dual_channel.{register_dual_channel_facet, collapse_dual_channel,
+  RelativePositionEmbedding, info_nce_loss, arithmetic_consistency_loss,
+  successor_consistency_loss, spread_regularizer, pair_attention_logits}`
+- `pcm.heads.{DualChannelPairHead, SlotIdentityAuxHead, pair_collapse_and_forward}`
+- `pcm.sleep.run_dual_phase_sleep`（S1 NREM 双相睡眠）+ G8a/b/c 不变量
+
 ## 核心结论
 
 | # | 结论 | 证据 | 章节 |

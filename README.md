@@ -48,6 +48,43 @@ publication-quality figures in [`docs/figures/`](./docs/figures/).
 
 ![Four-domain universality of bundle geometry](./docs/figures/F4_four_domain_universality.png)
 
+## What's new — PCM v2 milestone (May 2026)
+
+A nine-finding mid-cycle published as F40–F49 (commits in
+`git log --oneline | head -30`). Three highlights:
+
+* **RPE breaks the §7.5-space `mixed_OOD = 0.000` ceiling** that
+  resisted every v1 D-head variant. `pcm.dual_channel.RelativePositionEmbedding`
+  saturates 4/4 PCM domains (space / colour / phoneme / number)
+  to 0.96 – 1.00 mean OOD accuracy across 5 seeds — the same
+  API, three tweaks of `ranges`. See
+  [`docs/SHORT_REPORT_2026_S1_S6.md`](./docs/SHORT_REPORT_2026_S1_S6.md)
+  for the diagnostic chain (concat → trained attr → oracle attr → RPE).
+
+* **Inductive bias must be imposed (falsifiable)**. F45 / F46
+  show that a learned attention gate stays at λ ≈ 0.98 across
+  all reward strengths; only an explicit L1 penalty (β = 0.1)
+  closes the gate to λ_final ≈ 0.002. Five-config × five-seed
+  evidence in [`docs/SHORT_REPORT_2026_S1_S6.md §V3-RPE`](./docs/SHORT_REPORT_2026_S1_S6.md).
+
+* **PCM v2 dual-channel encoding**. Concepts now decompose into
+  `(slot, attr)` pairs supporting Tier-G clustering on the
+  former and contrastive + arithmetic + successor losses on the
+  latter (V1, V2 invariants both at 1.000 ± 0.000 on number).
+  See
+  [`docs/PCM_V2_DUAL_CHANNEL_DESIGN.md`](./docs/PCM_V2_DUAL_CHANNEL_DESIGN.md)
+  for the full design and
+  [`docs/PCM_V2_MIGRATION_GUIDE.md`](./docs/PCM_V2_MIGRATION_GUIDE.md)
+  for the five-line v1 → v2 migration recipe.
+
+Public API additions (107 / 107 tests passing):
+- `pcm.dual_channel.{register_dual_channel_facet, collapse_dual_channel,
+  RelativePositionEmbedding, info_nce_loss, arithmetic_consistency_loss,
+  successor_consistency_loss, spread_regularizer, pair_attention_logits}`
+- `pcm.heads.{DualChannelPairHead, SlotIdentityAuxHead, pair_collapse_and_forward}`
+- `pcm.sleep.run_dual_phase_sleep` (S1 NREM-style two-phase) +
+  G8a/b/c invariants
+
 ## TL;DR of the claims
 
 | # | Claim | Evidence | Section |

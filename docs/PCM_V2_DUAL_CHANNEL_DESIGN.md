@@ -1,7 +1,19 @@
 # PCM v2 — Dual-Channel Concept Architecture
 
-**Status**: design proposal, May 2026, motivated by S1–S6 ceilings
-documented in `docs/SHORT_REPORT_2026_S1_S6.md`.
+**Status**: design proposal → **MVP validated, freeze part 1 shipped** (May 2026).
+Motivated by S1–S6 ceilings documented in `docs/SHORT_REPORT_2026_S1_S6.md`;
+experimentally validated by F42–F49.
+
+> **Update May 2026:** the original two-channel proposal (slot + attr)
+> validated V1 / V2 invariants but only achieved partial pass on V3
+> (`mixed_OOD = 0.240 ± 0.102`, vs target ≥ 0.30). Diagnostic D4
+> showed the bottleneck was head-side displacement coverage, not
+> bundle-side attr learning. We added a **third channel — relative
+> position embedding (RPE)** as a first-class option for pair-input
+> heads; this version saturates V3 to 1.000 across 5 seeds and
+> generalises to colour / phoneme / number with the same pattern.
+> See §10 below for the V3-RPE update and §11 for A1/A2 gate
+> findings.
 
 This document proposes the first **architecture-level** redesign of PCM
 since the original Tier-A/B/C/D split. It does **not** discard the
@@ -235,3 +247,114 @@ phoneme) by addressing the same generalisation goals at a deeper layer:
 If v2 MVP succeeds, S7 and S8 become **two-line config experiments** on
 top of the dual-channel substrate rather than separate research threads.
 
+---
+
+## 10. V3 update — RPE as the third channel
+
+After F42 validated V1 + V2 at 1.000, the V3 (space `mixed_OOD`)
+gate cleared `0.240 ± 0.102` (F43): well above v1 baseline 0.000
+but below the strict 0.30 target. A four-step diagnostic chain
+(F44, see also `docs/SHORT_REPORT_2026_S1_S6.md §V3-RPE`) showed:
+
+| step | hypothesis | result |
+| --- | --- | --- |
+| v2 V3 trained attr | dual-channel partially fixes coverage | 0.240 ± 0.102 |
+| **D4 oracle attr** | bottleneck is in attr learning | **0.100 ± 0.087** (worse!) |
+| D4 + ReLU head | maybe linear `attr_diff` was too weak | 0.000 ± 0.000 |
+| **RPE-only head** | bottleneck is head-side displacement coverage | **1.000 ± 0.000** ✓ |
+
+**Update**: the v2 architecture now exposes **three** complementary
+channels per concept-pair, not two:
+
+```
+   v2 (May 2026):
+     concept_a → (slot_a, attr_a)
+     concept_b → (slot_b, attr_b)
+     pair (a, b) → also access RPE(displacement(a, b))
+                              ↑
+                        learnable embedding of (Δ₁, …, Δₖ)
+```
+
+* **slot facet** — discrete cluster identity (same as in §2);
+* **attr facet** — continuous, contrastive + arithmetic (§2);
+* **RPE table** — head-side embedding of integer displacements,
+  keyed on caller-supplied delta tuples
+  (`pcm.dual_channel.RelativePositionEmbedding`).
+
+The RPE channel is **head-side, not bundle-side**: it lives in the
+:class:`pcm.heads.DualChannelPairHead` rather than as a third
+facet on `ConceptGraph`. This is deliberate — RPE encodes
+*displacement* between two concepts, not a property *of* a single
+concept, so it does not belong on the bundle.
+
+Cross-domain validation (F48) on `pcm.dual_channel.RelativePositionEmbedding`:
+
+| domain | task | concat (v1-style) | RPE (v2.1) | gap |
+| --- | --- | --- | --- | --- |
+| space (5×5/7×7 mixed_OOD) | direction | 0.000 | **1.000 ± 0.000** | +100 pp |
+| colour (12-cyclic, holdout hue) | (b−a) mod 12 | 0.000 | **1.000 ± 0.000** | +100 pp |
+| phoneme (V/M/P 3-axis) | joint Δ class | 0.003 | **0.965 ± 0.020** | +96 pp |
+| number (1-d, \|Δ\| ≤ 29) | b−a class | 0.013 | 0.764 ± 0.009 | +75 pp |
+
+The number domain's 0.764 (vs others' 0.96+) is a clean coverage
+limit, not a failure: train pairs cover only `|Δ| ≤ 19`, but test
+contains `|Δ| ≤ 29`; RPE-as-lookup cannot extrapolate beyond seen
+displacements. Length-OOD beyond train range needs a **functional**
+RPE (sinusoidal / RoPE / ALiBi), which is a clean follow-up
+direction explicitly enumerated in §11 below.
+
+## 11. A1 / A2 gate findings — when slot path is auxiliary
+
+When a `DualChannelPairHead` enables both the RPE path and a slot
+attention path simultaneously, the resulting fixed-λ mix at λ=1.0
+on the V3 grid gives `mixed_OOD = 0.833 ± 0.115`, lower than
+RPE-only at 1.000. F45–F46 decomposed why:
+
+* **A1 (linear schedule, λ : 1.0 → 0.0)** — `mixed_OOD = 1.000`.
+  Manual prior recovers the architectural lever; the slot path is
+  active early and faded out before it can contaminate.
+* **A2 (learned gate, sigmoid scalar init at 0.98)** — `mixed_OOD
+  = 0.720`, `λ_final = 0.982`. The model **does not** spontaneously
+  close the gate; train_acc=1.000 saturates train_loss and gives
+  the gate no gradient pressure.
+* **A2+ reward (α-weighted holdout CE)** — α ∈ {0.5, 2.0} both
+  leave `λ_final ≈ 0.98`. Reward signal makes the model "study
+  harder" but does not simplify the architecture.
+* **A2+ self-discipline (β-weighted L1 on gate)** — β=0.1 alone
+  gives `λ_final = 0.002` and `mixed_OOD = 1.000`. **Explicit
+  simplification pressure is what closes the gate; reward is
+  neither necessary nor sufficient.**
+
+PCM v2 default policy (encoded in `DualChannelPairHead`):
+
+| context | recommendation |
+| --- | --- |
+| pair-input head with both slot and RPE active | `gate_mode="schedule"` (cheapest) |
+| pair-input head needing data-driven gate | `gate_mode="learned"` + L1 on `head.gate_l1()` |
+| pair-input head with slot active, no RPE | `gate_mode="fixed"` (legacy v2 default) |
+| pair-input head with RPE only | gate has no effect; pick any mode |
+
+This is the falsifiable form of "inductive bias must be imposed"
+within PCM: the model never finds its own minimum sufficient
+statistic without an explicit simplification pressure.
+
+## 12. Open follow-ups
+
+The v2 freeze (F49) gives a stable surface for the next research
+arc. Concrete follow-ups, in order of expected payoff:
+
+1. **Functional RPE** — replace `RelativePositionEmbedding` lookup
+   with sinusoidal / RoPE / ALiBi heads. Test on number length-OOD
+   to see whether |Δ| > train_max becomes generalisable.
+2. **Cyclic RPE** — current API treats every axis as linear; add
+   `cyclic` flag for hue / phase tasks where the displacement
+   space is `(0, n-1)` modular.
+3. **D4-style ablations cross-domain** — repeat the oracle-attr
+   ablation on number / colour / phoneme to verify whether the
+   "bottleneck in head, not bundle" diagnosis is universal.
+4. **A2+ on other domains** — test whether the "rewards motivate,
+   only L1 simplifies" pattern holds outside the V3 grid; if so,
+   it is a publishable position paper finding.
+5. **Migration of v1 baselines** — port §6.6/6.7/6.8/6.9/7.4/7.5*
+   to v2 dual-channel + RPE and re-run; expected: most ceilings
+   collapse, several baselines tighten by 5 – 50 pp.

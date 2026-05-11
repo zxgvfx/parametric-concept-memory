@@ -6,6 +6,93 @@ and the [Keep a Changelog](https://keepachangelog.com/) conventions.
 
 ## [Unreleased]
 
+### Added — PCM v2 Dual-Channel + RPE Architecture (F40 – F49)
+
+The first architecture-level redesign of PCM since the original
+Tier-A/B/C/D split. Motivated by three independent S1–S6
+falsifications (S3 `mixed_OOD = 0.000`, S6 vector analogy < chance,
+S2 number dead-codebook), all of which trace to one design flaw:
+encoding a concept as **a single vector** that has to serve as
+positional address, categorical identity, and continuous attribute
+axis simultaneously.
+
+**Public API (frozen at F49):**
+- **`pcm/dual_channel.py`** — opt-in dual-channel concept encoding:
+  - `register_dual_channel_facet(cg, base, slot_dim, attr_dim)` →
+    paired `<base>_slot` (Tier-G clustered) + `<base>_attr`
+    (excluded from sleep, contrastive-trained) facets.
+  - `collapse_dual_channel(cg, base_facet, ids, ...)` → drop-in
+    dual-channel replacement for `cg.collapse_batch`.
+  - `info_nce_loss`, `arithmetic_consistency_loss`,
+    `successor_consistency_loss` (with norm penalty),
+    `spread_regularizer` — attribute-channel loss primitives.
+  - **`RelativePositionEmbedding(ranges, embed_dim)`** — k-axis
+    learned embedding of integer displacements; the V3 lever.
+  - `pair_attention_logits` — minimal pair-attention primitive.
+- **`pcm/heads/v2_dual_channel.py`** — public PCM v2 muscles:
+  - `DualChannelPairHead` — pair-input head with three optional
+    paths (slot attention / attribute MLP / RPE lookup) and three
+    gate modes (`fixed` / `schedule` / `learned`).
+  - `SlotIdentityAuxHead` — single-input identity aux head
+    (LastDigit/RowIndex analogue for v2).
+  - `pair_collapse_and_forward` — v1-style ergonomics.
+- **`pcm.sleep.run_dual_phase_sleep`** — S1 NREM-style two-phase
+  sleep (small-pupil "fresh" + large-pupil "old"); new
+  `PROTO_CID_PHASE_TEMPLATE` + `RELATION_CID_PHASE_TEMPLATE`
+  cid templates; G8a / G8b / G8c invariants in
+  `tests/test_tier_g_sleep.py`.
+
+**Bug fix:**
+- `ConceptGraph._ensure_facet` device-equality regression: the
+  pre-fix `pool.device != torch.device(device)` comparison
+  silently rebuilt the bundle pool `nn.Parameter` whenever the
+  caller passed `"cuda"` while the pool was on `cuda:0`,
+  invalidating optimiser references and freezing v2 V1/V2
+  training at its random init. Fixed in F42 with regression
+  tests `tests/test_concept_graph_device.py` (3 cases).
+
+**Empirical results (5-seed mean ± std, see `docs/SHORT_REPORT_2026_S1_S6.md`):**
+- **V1 (slot purity)** — number N=10: NMI = 1.000 ± 0.000 ✓
+- **V2 (vector analogy)** — number N=10: top1 = 1.000 ± 0.000 ✓
+- **V3 (mixed_OOD)** — space 5×5/7×7 grid: 1.000 ± 0.000 ✓
+  (RPE-only; A1 schedule reproduces; A2 learned alone fails to
+  0.720; A2 + L1 β=0.1 recovers to 1.000).
+- **Cross-domain RPE (F48)** — concat baseline → RPE (5 seeds):
+  - space (5×5 mixed_OOD): 0.000 → **1.000 ± 0.000** (+100 pp)
+  - colour (12-cyclic, hue holdout): 0.000 → **1.000 ± 0.000**
+  - phoneme (V/M/P 3-axis): 0.003 → **0.965 ± 0.020** (+96 pp)
+  - number (1-d, |Δ| ≤ 29): 0.013 → 0.764 ± 0.009 (+75 pp;
+    bounded by lookup range, motivates functional RPE in v3)
+
+**Design observation, falsifiable form:**
+"Models do not spontaneously discover their own minimum
+sufficient statistic via gradient descent" — A2 learned gates
+stay at λ ≈ 0.98 across all reward strengths; only an explicit
+L1 penalty (β=0.1) closes the gate. See F46 commit message and
+`docs/SHORT_REPORT_2026_S1_S6.md §V3-RPE` for the five-config
+× five-seed evidence.
+
+**Documentation:**
+- `docs/PCM_V2_DUAL_CHANNEL_DESIGN.md` — design proposal +
+  V3-RPE update (§10) + A1/A2 gate findings (§11) + open
+  follow-ups (§12).
+- `docs/PCM_V2_MIGRATION_GUIDE.md` — five-line v1 → v2
+  migration recipe + per-head mapping table + reproducibility
+  smoke commands.
+- `docs/SHORT_REPORT_2026_S1_S6.md` — full F40–F48 spin-off
+  short-report draft.
+- `docs/2026_LITERATURE_AND_PLANS.md` — 23-paper literature
+  survey across cognitive neuroscience / developmental psych /
+  anthropology / philosophy / 2026 ML.
+
+**Tests (107 / 107 passing):**
+- 19 new in `tests/test_dual_channel.py` (DC1 facet pairing,
+  DC2 collapse, DC3 losses, DC4 RPE 1-D/2-D/3-D, DC5 pair
+  attention, DC6 public heads).
+- 3 new in `tests/test_concept_graph_device.py` (F42 regression).
+- 3 new in `tests/test_tier_g_sleep.py::TestG8DualPhaseSleep`
+  (G8a/b/c S1 invariants).
+
 ### Added — Tier-G Sleep Abstraction Pass (D95)
 - **`pcm/sleep.py`** — opt-in offline pass that performs NREM-style
   codebook compression on `bundle_pool[facet]` rows, registers
