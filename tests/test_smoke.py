@@ -19,7 +19,7 @@ class TestPublicAPI(unittest.TestCase):
     def test_imports(self) -> None:
         from pcm import ConceptGraph as CG  # noqa: F401
         from pcm.heads import (  # noqa: F401
-            ArithmeticHead, ArithmeticHeadV2 as V2, ComparisonHead,
+            ArithmeticHeadV2 as V2, ComparisonHead,
             NumerosityClassifier, NumerosityEncoder,
         )
 

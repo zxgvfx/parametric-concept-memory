@@ -52,12 +52,14 @@ figures in [`docs/figures/`](./docs/figures/).
 pcm/                      core framework
 ├── concept_graph.py      ConceptGraph + ConceptNode
 ├── param_bundle.py       ParamBundle (nn.ParameterDict) + ContextualizedConcept
-└── heads/                task-specific muscles
+└── heads/                task-specific muscles + Tier-D cook layer
     ├── arithmetic_head_v2.py
     ├── comparison_head.py
     ├── numerosity_encoder.py      (+ DatasetConfig, generate_dot_canvas)
     ├── numerosity_classifier.py
-    └── arithmetic_head.py         (legacy, for older experiments)
+    ├── cook_factory.py            (generic MLPBackbone / HeadAsBackbone /
+    │                              make_cook_subgraph)
+    └── cook_wrappers.py           (per-head build_*_cook factories)
 
 experiments/              paper replications (run with `python -m experiments.<name>`)
 ├── _graph_builder.py              shared ANS graph builder

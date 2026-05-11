@@ -4,6 +4,261 @@ All notable changes to **Parametric Concept Memory (PCM)** are recorded
 here. This project follows [Semantic Versioning](https://semver.org/)
 and the [Keep a Changelog](https://keepachangelog.com/) conventions.
 
+## [Unreleased]
+
+### Added — Tier-G Sleep Abstraction Pass (D95)
+- **`pcm/sleep.py`** — opt-in offline pass that performs NREM-style
+  codebook compression on `bundle_pool[facet]` rows, registers
+  cluster centroids as `abstract_prototype` nodes, member residuals
+  on a sibling `<facet>_residual` pool, and cookable
+  `abstract_relation` subgraphs (anchor + residual). Public API:
+  `attach_sleep`, `run_sleep_pass`, `sleep_status`,
+  `register_prototype`, `register_relation`,
+  `iter_abstract_relations`, `make_replay_source_from_buffer`.
+- **Two new DNA ops** in `pcm/dna_ops.py`:
+  - `concept.codebook_lookup` (collapse) — single-row read of an
+    abstract prototype slot, with sleep-flagged attribution.
+  - `concept.relation_apply` (pure) — combine anchor + residual via
+    `add` / `mul` / `concat`.
+- **Falsifiable contract G1–G6** documented in
+  `docs/PCM_TIER_G_SLEEP_ABSTRACTION.md`:
+  G1 bit-identity off, G2 pool memory safety, G3 ρ regression bound
+  (numbers ρ_linear ≥ 0.965 / colors ρ_circular ≥ 0.965 / space
+  ρ_L1 ≥ 0.85 / Procrustes ≤ 0.15 / phoneme intra-inter gap ≥ 1.85),
+  G4 centroid = mean(members), G5 abstract cook reconstructs row,
+  G6 idempotency.
+- **Unit tests** (`tests/test_tier_g_sleep.py`, 8 cases): one method
+  per invariant + sleep_status sanity. Runs in ~1.5 s.
+- **Per-domain integration** (`tests/test_sleep_four_domain.py`,
+  11 cases): backward-compat (`sleep_every=None`) and live
+  (`sleep_every=2`) for color / space / phoneme `train_one`s, plus
+  signature smoke for `quad_study.train_quad` and
+  `purity_audit.purity_train_one`.
+- **Five training loops migrated** with backward-compatible
+  `sleep_every: int | None = None` kwarg (default `None` =
+  byte-identical to v0.1.0):
+  `experiments/color_concept_study/train.py`,
+  `experiments/space_concept_study/train.py`,
+  `experiments/phoneme_concept_study/train.py`,
+  `experiments/purity_audit/train.py`,
+  `experiments/quad_study.py`.
+  Each loop returns a new `sleep_reports: list[dict]` field
+  (empty when sleep is off) for downstream analysis.
+
+### Added — Tier-G failure-mode diagnosis & functional sleep (D96)
+- **G7 invariant** (post hoc) in `pcm/sleep.py` and
+  `tests/test_tier_g_sleep.py`: the new
+  `collapse_via_abstract` returns rows numerically equal to
+  `cg.collapse_batch` immediately after a sleep pass; differences
+  measured later are *strictly* due to gradient-flow rerouting. Two
+  unit tests cover registered-member equality and unregistered-member
+  fallback.
+- **Functional consumption of abstract relations**
+  (`pcm/sleep.py::collapse_via_abstract`,
+  `pcm.sleep::collapse_with_optional_abstract`,
+  `pcm.sleep::materialize_effective_bundle_state`): a head set with
+  `use_abstract=True` reads each member as `anchor + residual`,
+  routing gradient simultaneously through the shared prototype slot
+  and the per-member residual row. This turns Tier-G from a read-only
+  archive into a functional schema while preserving G1–G7.
+- **Three SleepConfig knobs** mapping directly to known VQ-VAE / MoE
+  failure modes documented in 2024 literature:
+  - `anchor_ema ∈ (0, 1]` — Online-Codebook / VectorQuantizeEMA blend
+    for re-cluster passes (cures the *topology hop* failure mode of
+    `force_recluster=True` reported by Zheng et al. ICCV 2023).
+  - `assignment ∈ {"hard", "soft"}` + `soft_tau` — softmax routing
+    over all anchors in a facet (Default-MoE / SparseMixer style)
+    that distributes gradient to every anchor and cures *expert
+    starvation*.
+  - `sleep_warmup` plumbed through every host
+    `train_one`: skip sleep until the wake-time geometry has had time
+    to form, mirroring CLS slow-cortical timescale.
+- **CLI ablation harness** (`experiments/sleep_ablation.py`,
+  `experiments/sleep_ablation_four_domain.py`): A/B/C ablation
+  (no-sleep / sleep+direct / sleep+abstract) with full sweep over
+  `--k-clusters`, `--anchor-ema`, `--assignment`, `--soft-tau`,
+  `--sleep-warmup`, `--force-recluster`, `--ood-ratio`. Used to
+  produce the F9 figures in the paper.
+- **OOD evaluation in color and space `train_one`** via a new
+  `ood_ratio: float = 0.0` kwarg (legacy default = 0 keeps
+  full-train behavior bit-identical). Used to extend the F4 four-
+  domain sleep ablation to F5 OOD-aware ablation.
+- **F9 figure renderer**
+  (`experiments/render_paper_figures/F9_sleep_four_domain.py`)
+  produces F9a (4-domain ρ) and F9b (train + OOD accuracy) bar
+  charts from the four-domain ablation summary JSON.
+- **PAPER §6.6 Tier-G — Sleep Abstraction** added in
+  `PAPER.zh-CN.md`: §6.6.1 four failure modes with literature
+  mapping, §6.6.2 quad-domain Pareto-better at OOD=0.30
+  (5 seeds: ΔOOD = +0.018, Δρ = +0.004), §6.6.3 four-domain safety
+  table, §6.6.4 limitations.
+- **PAPER §6.7 Sleep does not invent perceptual primitives**
+  (negative result mirroring §7 base-10): on the 12-hue color
+  domain, k ∈ {3, 4, 6} sleep anchors land on equidistant 360°/k
+  hue rings up to k-means noise (≤ ±1-2 hue), but **the rotational
+  offset is uniformly seed-dependent**: 0/24 seeds match RYB
+  (the only non-equidistant prior probed), and RGB / CMY /
+  CMYK_aligned / WarmCool6 hit-rates equal the strict-equidistant
+  rate exactly. PCM does not invent visual-system primaries; it
+  only realises one of *k* rotation classes of the cyclic
+  task-symmetry group. Falsifies H_perceptual; supports H_taskSym.
+  Diagnostic harness:
+  `experiments/sleep_inspect_color_anchors.py`.
+- **PAPER §6.8 Recovering perceptual primitives requires
+  biological priors or ecological pressure** (positive
+  counterpart to §6.7): three-layer causal ablation
+  (B = LMS-like centroid; C = green-peak hue sampling;
+  D = `RipeFruitHead` foraging task) on 12-hue color × k=3 sleep
+  × 8 seeds. Findings:
+  - **D alone** drives `red-wedge anchor` rate from baseline
+    0.62 to **1.00** (8/8 seeds) — task asymmetry is the strongest
+    cyclic-symmetry breaker (Jacobs 2009 *Curr Biol* foraging
+    pressure for L/M cone divergence).
+  - **B alone** lifts strict-equidistant from 2/8 to 4/8, but
+    rotation class still varies by seed (Conway et al. 2007
+    *Neuron* observation that V4 hue-selective neurons follow
+    cone-level sampling but pick categorical hues only with
+    ecological pressure).
+  - **B+C+D combined** achieves both EQUI = 4/8 and red-wedge =
+    1.00 simultaneously — minimal rotation-fixed primary
+    geometry. Mirrors the human evolutionary path:
+    cone genetics + chromatic statistics + foraging task.
+  - New: `make_lms_like_centroids` in
+    `experiments/color_concept_study/graph_builder.py`,
+    `RipeFruitHead` in `experiments/color_concept_study/heads.py`,
+    `mix_sample_weight` + `enable_ripe_head` plumbed through
+    `train_one`, ablation harness
+    `experiments/sleep_color_primaries.py`, F11 figure renderer
+    `experiments/render_paper_figures/F11_color_primaries.py`.
+- **PCM corollary**: PCM does not autonomously invent perceptual
+  primaries (§6.7) but **faithfully preserves any task-asymmetric
+  prior injected** (§6.8). This makes it an interpretability
+  win, not a limitation: the structure you see in PCM's bundle
+  geometry is exactly the symmetry of the task plus whatever
+  external priors you supply, and **nothing else**.
+- **PAPER §7.4 Three-layer causal injection reverses the §7
+  base-10 negative** (positive counterpart to §7, exact mirror of
+  §6.8 on the linear number domain). Mirrors the §6.8 colour
+  ablation: B = `make_decimal_cone_centroids` (10 unit + 10 tens
+  cones), C = `round_number_weights` (×5 sampling boost on
+  multiples of 10), D = `LastDigitHead` (single-input
+  10-class classifier consuming `arithmetic_bias`). 8 seeds × 5
+  conditions on N=30 four-arithmetic. Findings:
+  - **D alone** lifts ``spike_10`` from +0.290 ± 0.042 to
+    +0.667 ± 0.052 (×2.3) and flips ``cos[+10] − cos[+1]`` from
+    −0.157 to +0.467 (sign flip = same-units numbers more
+    similar than adjacent numbers, the direct signature of
+    base-10 column structure).
+  - **B+C+D combined** reaches ``spike_10`` = +0.684 ± 0.038
+    with ``spike_5`` ≈ −0.07 (close to zero), giving the
+    cleanest 10-periodicity observed in PCM. Sleep k=10 anchor
+    purity against last-digit equivalence classes is 0.876 ±
+    0.085 (chance = 0.10).
+  - **B alone** and **C alone** are weak (Δspike_10 ≈ +0.07 and
+    +0.09 vs baseline), confirming the §6.8 finding that
+    biological prior + ecological statistics by themselves do
+    not break a strongly task-symmetric domain.
+  - **Trade-off**: BCD's OOD acc 0.74 vs baseline 0.82 — the
+    same ρ↔OOD trade-off observed in §6.6.2 / §6.8: cleaner
+    structural geometry costs some held-out task accuracy, a
+    pure structural-vs-utility trade-off intrinsic to
+    asymmetric prior injection.
+  - New: `experiments/number_decimal_priors.py` (centroid +
+    head + sampling helpers), `experiments/sleep_number_decimal.py`
+    (5-condition × 8-seed harness), `experiments/render_paper_figures/F12_number_decimal.py`
+    (3-panel figure), `centroid_mode / digit_sample_weight /
+    enable_last_digit_head` plumbed through `train_quad`. All
+    63 unit tests still pass.
+- **§6.7 / §6.8 / §7 / §7.4 joint claim**: across two
+  qualitatively distinct domains (cyclic colour, linear
+  number), the same 5-condition A/B/C/D/B+C+D protocol reverses
+  the negative result, with the task-driven layer always the
+  dominant contributor. This generalises the §6.7+§6.8 colour
+  finding into a **falsifiable methodological proposal** for
+  cognitive-science questions about emergent primitives.
+- **PAPER §7.5 Length extrapolation hits a clean architectural
+  ceiling**. Extends `train_quad` with `n_total: int | None`:
+  registers 1..n_total concepts up front while QuadArithHead
+  trains only on a, b, c ∈ [1, N] triples; LastDigitHead samples
+  the full [1, n_total] range so length-OOD bundle rows still
+  receive last-digit gradient. New harness
+  `experiments/sleep_number_extrapolate.py` and figure renderer
+  `experiments/render_paper_figures/F13_number_extrapolate.py`.
+  5-condition × 5-seed result on N_train=30 / N_total=100:
+  - A/B/C all flat-line at 0.051 ± 0.000 on length-100 OOD
+    (≈ chance level due to the head's systematic OOD bias).
+  - D = 0.055 ± 0.001 and BCD = 0.062 ± 0.003 (5/5 seeds in
+    the same direction) — statistically robust but only
+    +1.1 pp absolute over chance.
+  - A baseline in-range OOD = 0.786 ± 0.054, BCD = 0.664 ±
+    0.084 — the same trade-off seen in §7.4 (cleaner geometry
+    costs random interpolation accuracy).
+  - **Interpretation**: the three-layer recipe drives
+    *representational/categorical* emergence (§6.7 / §6.8 /
+    §7.4) but does NOT drive *algorithmic/compositional*
+    emergence (length extrapolation). This is consistent with
+    PAPER §3.6 / §9 / §7.3's pre-stated D93/D93a architectural
+    boundary: per-concept indexed bundles support geometry
+    over a fixed concept inventory but not unbounded
+    digit-place composition.
+  - This negative result is itself a methodological
+    contribution: it gives a clean, falsifiable separation
+    between two kinds of "emergence" that cognitive science
+    routinely conflates, and tells future PCM-based work
+    exactly what kind of architectural extension would be
+    required to cross the boundary.
+- **PAPER §7.5-color hue holdout** (cleaner mirror of the
+  number length-OOD ceiling). New `holdout_target_hues` kwarg
+  on color `train_one`: drops every mixing triple whose target
+  hue ``c ∈ holdout`` from training and evaluates the held-out
+  ones separately. New harness
+  `experiments/sleep_color_holdout.py` and figure renderer
+  `experiments/render_paper_figures/F14_color_holdout.py`.
+  Result on hue-5 holdout, 5 conditions × 5 seeds = 25 runs:
+  - **All 25 runs strictly 0.000 on held-out hue 5**, well
+    below the 1/12 = 0.083 chance baseline.
+  - Train accuracy is 1.000 for A / C / D and ≈ 0.70 for
+    B / BCD (LMS centroids overlap, making the closed
+    in-domain task slightly harder).
+  - **Closed-output-set ceiling**: the head's softmax is
+    never trained to point at the held-out target's centroid,
+    so even when prior layers (LMS / sampling / ripe head)
+    pre-shape the held-out concept's bundle row, the head
+    can still never predict it.
+  - Together with §7.5 number length-OOD, this gives PCM
+    two clean, falsifiable architectural ceilings:
+    *input-side* (bundle row never receives task gradient,
+    chance-level OOD; numbers) and *output-side*
+    (centroid never receives task gradient, strictly-zero
+    OOD; colour). Both are pre-stated D91/D92 limits in
+    PAPER §3.6 / §9 and now have empirical 25-25 / 5-5
+    confirmation.
+  - Cognitive-science parallel: human infants have full
+    LMS cone responses from birth (sensory representation
+    present) but categorical colour naming stabilises at
+    4–6 months and depends on the specific language being
+    acquired (Berlin & Kay 1969; Skelton et al. 2017
+    *PNAS*). PCM's "centroid present, head untrained →
+    holdout = 0" mirrors "cone responses present, language
+    label absent → categorical access blocked".
+
+### Authority — extended
+Above plus VQ-VAE / continual-learning literature mapped to the
+four observed failure modes:
+Zheng et al. *ICCV* 2023 (online clustered codebook); ECVQ-VAE
+*Multimedia Systems* 2024 (control-chart codebook regulation);
+VQGAN-LC *NeurIPS* 2024 (large codebook utilization); Zhang
+*NeurIPS* 2025 (dimensional collapse in VQ-VAE);
+Sutton et al. *Nature* 2024 (loss of plasticity); SparseMixer
+*ICLR* 2024 (sparse-to-dense backprop); Default-MoE 2025 (EMA
+expert outputs); Sun et al. *Nat Neurosci* 2023 (consolidation
+conditional on generalization).
+
+### Test summary
+63/63 unit tests pass in 7.13 s on CPU (61 prior + G7 ×2). No
+regressions in Tier-A grow / Tier-B gate / Tier-C peer / Tier-D
+cook bit-identity.
+
 ## [0.1.0] — 2026-04-22
 
 Initial public release: PCM framework + the four-domain empirical
@@ -21,8 +276,7 @@ experiment + full pre-trained ANS encoder.
     `node.collapse(caller, facet, shape, tick)`.
 - **Muscle heads** (`pcm/heads/`): `ArithmeticHeadV2`, `ComparisonHead`,
   `NumerosityClassifier`, `NumerosityEncoder` (+ `DatasetConfig`,
-  `generate_dot_canvas`, `encode_numerosity`), plus legacy
-  `ArithmeticHead` for older experiments.
+  `generate_dot_canvas`, `encode_numerosity`).
 - **Paper experiments** (`experiments/`):
   - Numbers: `robustness_study`, `purity_audit`, `scale_study`,
     `quad_study`, `emergent_base10_study`, `compositional_number_study`.

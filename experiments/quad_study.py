@@ -38,6 +38,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from scipy.stats import spearmanr
 
+from pcm.sleep import SleepConfig, attach_sleep, run_sleep_pass
+
 from experiments.purity_audit import (
     build_graph_with_id_fn,
     make_random_orthogonal_centroids,
@@ -92,13 +94,31 @@ def enumerate_triples(N: int, step: float = 1.0) -> dict[str, list[tuple[float, 
 
 
 class QuadArithHead(nn.Module):
-    """四则肌肉: 消费 arithmetic_bias facet + 4d op_onehot."""
+    """四则肌肉: 消费 arithmetic_bias facet + 4d op_onehot.
 
-    def __init__(self, embed_dim: int = 128, bias_dim: int = BIAS_DIM, n_ops: int = 4) -> None:
+    ``use_abstract=True`` 切到 Tier-G 抽象读取通路: 每个 member 的 bias
+    通过 ``anchor_centroid + member_residual`` 重建, 强制梯度流经 sleep
+    注册的 prototype + residual. 默认 False 保留 D91/D92 直接读路径,
+    Tier-A/B/C/D 路径 bit-identical.
+    """
+
+    def __init__(
+        self,
+        embed_dim: int = 128,
+        bias_dim: int = BIAS_DIM,
+        n_ops: int = 4,
+        *,
+        use_abstract: bool = False,
+        assignment: str = "hard",
+        soft_tau: float = 0.5,
+    ) -> None:
         super().__init__()
         self.embed_dim = embed_dim
         self.bias_dim = bias_dim
         self.n_ops = n_ops
+        self.use_abstract = use_abstract
+        self.assignment = assignment
+        self.soft_tau = soft_tau
         in_dim = 2 * bias_dim + n_ops
         self.fc1 = nn.Linear(in_dim, embed_dim)
         self.fc2 = nn.Linear(embed_dim, embed_dim)
@@ -121,20 +141,34 @@ class QuadArithHead(nn.Module):
 
     def _collapse_batch(self, ids: list[str], cg, tick: int) -> torch.Tensor:
         device = next(self.parameters()).device
-        rows = []
-        for cid in ids:
-            if cid not in cg.concepts:
-                raise KeyError(f"concept {cid!r} missing")
-            cc = cg.concepts[cid].collapse(
-                caller="QuadArithHead",
-                facet="arithmetic_bias",
-                shape=(self.bias_dim,),
-                tick=tick,
-                init="normal_small",
-                device=device,
+        if self.use_abstract and getattr(cg, "sleep_enabled", False):
+            from pcm.sleep import (
+                RESIDUAL_FACET_TEMPLATE,
+                collapse_via_abstract,
             )
-            rows.append(cc.as_tensor())
-        return torch.stack(rows, dim=0)
+            res_facet = RESIDUAL_FACET_TEMPLATE.format(facet="arithmetic_bias")
+            if res_facet in cg.bundle_pool:
+                return collapse_via_abstract(
+                    cg,
+                    caller="QuadArithHead",
+                    facet="arithmetic_bias",
+                    concept_ids=ids,
+                    shape=(self.bias_dim,),
+                    tick=tick,
+                    init="normal_small",
+                    device=device,
+                    assignment=self.assignment,
+                    soft_tau=self.soft_tau,
+                )
+        return cg.collapse_batch(
+            caller="QuadArithHead",
+            facet="arithmetic_bias",
+            concept_ids=ids,
+            shape=(self.bias_dim,),
+            tick=tick,
+            init="normal_small",
+            device=device,
+        )
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -172,6 +206,19 @@ def train_quad(
     steps_per_epoch: int,
     batch_size: int = BATCH_SIZE,
     balanced_op: bool = True,
+    sleep_every: int | None = None,  # Tier-G: run sleep pass every N epochs
+    sleep_warmup: int = 0,  # Tier-G: skip the first N epochs before sleeping
+    sleep_force_recluster: bool = False,  # Tier-G: re-cluster on every pass
+    sleep_k_clusters: int | str = "auto",  # Tier-G: cluster count override
+    sleep_anchor_ema: float = 1.0,  # Tier-G: 1.0 = old hard overwrite,
+    # 0<α<1 = EMA blend new_centroid into old anchor row (Online Codebook style)
+    sleep_assignment: str = "hard",  # Tier-G: 'hard' or 'soft' (S2)
+    sleep_soft_tau: float = 0.5,  # Tier-G: temperature for soft assignment
+    use_abstract: bool = False,  # Tier-G: route head reads via anchor+residual
+    centroid_mode: str = "random",  # §7.4: 'random' or 'decimal_cones'
+    digit_sample_weight: list[float] | None = None,  # §7.4: per-number sampling bias
+    enable_last_digit_head: bool = False,  # §7.4: D-layer task head
+    n_total: int | None = None,  # §7.5: register 1..n_total concepts but train QuadArithHead only on 1..N (last-digit head still sees full range)
 ) -> dict:
     """train_triples: list of (a, b, op, c)."""
     torch.manual_seed(seed)
@@ -183,17 +230,54 @@ def train_quad(
         by_op_triples[t[2]].append(t)
     ops_with_data = [op for op in OPS if by_op_triples[op]]
 
-    # Build concept graph with all grid points (train + ood)
-    grid_vals = [i * step for i in range(1, N + 1)]
+    # Build concept graph with all grid points (train + ood). When
+    # n_total is supplied (§7.5 length extrapolation), register the
+    # full 1..n_total range up front so OOD numbers have a bundle row;
+    # QuadArithHead still trains only on the supplied train_triples
+    # (which by convention live within 1..N).
+    eff_total = int(n_total) if n_total is not None else N
+    if eff_total < N:
+        raise ValueError(
+            f"n_total ({eff_total}) must be >= N ({N}); cannot register "
+            "fewer concepts than the training range"
+        )
+    grid_vals = [i * step for i in range(1, eff_total + 1)]
     cg, _ = build_graph_with_id_fn(
-        1, N, id_fn=lambda idx, _step=step: value_to_concept_id(idx * _step, _step)
+        1, eff_total,
+        id_fn=lambda idx, _step=step: value_to_concept_id(idx * _step, _step),
     )
-    # ↑ `build_graph_with_id_fn` iterates n in range(1, N+1), so id_fn(n) = grid_vals[n-1]'s id
-    # = value_to_concept_id(n * step, step). Good.
-    # centroid: N classes (idx 0..N-1 correspond to values 1*step..N*step)
-    centroids = make_random_orthogonal_centroids(N, 128, seed)
+    # centroid: eff_total classes (idx 0..eff_total-1 correspond to values 1*step..eff_total*step)
+    if centroid_mode == "random":
+        centroids = make_random_orthogonal_centroids(eff_total, 128, seed)
+    elif centroid_mode == "decimal_cones":
+        from experiments.number_decimal_priors import make_decimal_cone_centroids
+        if step != 1.0:
+            raise ValueError(
+                "decimal_cones centroids only meaningful for integer "
+                "step=1.0; got step=" + str(step)
+            )
+        centroids = make_decimal_cone_centroids(eff_total, 128, seed).to(DEVICE)
+    else:
+        raise ValueError(f"unknown centroid_mode {centroid_mode!r}")
 
-    head = QuadArithHead().to(DEVICE)
+    head = QuadArithHead(
+        use_abstract=use_abstract,
+        assignment=sleep_assignment,
+        soft_tau=sleep_soft_tau,
+    ).to(DEVICE)
+
+    head_lastdigit = None
+    if enable_last_digit_head:
+        if step != 1.0:
+            raise ValueError("last_digit head only meaningful for integer step")
+        from experiments.number_decimal_priors import LastDigitHead
+        head_lastdigit = LastDigitHead(
+            BIAS_DIM,
+            use_abstract=use_abstract,
+            assignment=sleep_assignment,
+            soft_tau=sleep_soft_tau,
+        ).to(DEVICE)
+
     with torch.no_grad():
         for v in grid_vals:
             cid = value_to_concept_id(v, step)
@@ -203,12 +287,42 @@ def train_quad(
             )
     cg.bundles_to(torch.device(DEVICE))
 
-    params = list(head.parameters()) + list(cg.iter_bundle_parameters())
+    if digit_sample_weight is not None:
+        if len(digit_sample_weight) != N:
+            raise ValueError(
+                f"digit_sample_weight length must equal N (training range)={N}, "
+                f"got {len(digit_sample_weight)}"
+            )
+        # Pre-compute per-triple weight = w[a-1] * w[b-1] (a, b are 1..N values).
+        triple_weight_by_op: dict[str, list[float]] = {}
+        for op in OPS:
+            ws = []
+            for t in by_op_triples[op]:
+                ai = int(round(t[0] / step)) - 1
+                bi = int(round(t[1] / step)) - 1
+                ws.append(
+                    float(digit_sample_weight[ai]) *
+                    float(digit_sample_weight[bi])
+                )
+            triple_weight_by_op[op] = ws
+    else:
+        triple_weight_by_op = None
+
+    params = list(head.parameters())
+    if head_lastdigit is not None:
+        params += list(head_lastdigit.parameters())
+    params += list(cg.iter_bundle_parameters())
     opt = torch.optim.AdamW(params, lr=LR, weight_decay=1e-4)
+
+    if sleep_every is not None:
+        attach_sleep(cg, facets=["arithmetic_bias"])
+    sleep_reports: list[dict] = []
 
     n_triples = len(train_triples)
     for epoch in range(1, epochs + 1):
         head.train()
+        if head_lastdigit is not None:
+            head_lastdigit.train()
         for step_i in range(steps_per_epoch):
             if balanced_op and len(ops_with_data) > 1:
                 # 每 batch 在 ops 之间均衡 (防止 mul/div 稀疏 op 被淹没)
@@ -216,13 +330,22 @@ def train_quad(
                 per_op = max(1, batch_size // len(ops_with_data))
                 for op in ops_with_data:
                     pool = by_op_triples[op]
-                    for _ in range(per_op):
-                        batch.append(pool[rng_np.randrange(len(pool))])
+                    if triple_weight_by_op is not None:
+                        ws = triple_weight_by_op[op]
+                        picks = rng_np.choices(pool, weights=ws, k=per_op)
+                        batch.extend(picks)
+                    else:
+                        for _ in range(per_op):
+                            batch.append(pool[rng_np.randrange(len(pool))])
                 # fill remainder
                 while len(batch) < batch_size:
                     op = ops_with_data[rng_np.randrange(len(ops_with_data))]
                     pool = by_op_triples[op]
-                    batch.append(pool[rng_np.randrange(len(pool))])
+                    if triple_weight_by_op is not None:
+                        ws = triple_weight_by_op[op]
+                        batch.append(rng_np.choices(pool, weights=ws, k=1)[0])
+                    else:
+                        batch.append(pool[rng_np.randrange(len(pool))])
             else:
                 idxs = [rng_np.randrange(n_triples) for _ in range(batch_size)]
                 batch = [train_triples[i] for i in idxs]
@@ -236,20 +359,82 @@ def train_quad(
             op = op_onehot_tensor(op_l)
             pred = head(op, ids_a, ids_b, cg, tick=epoch * 10000 + step_i)
             loss = F.cross_entropy(pred @ centroids.t(), tgt)
+
+            if head_lastdigit is not None:
+                # Sample uniformly over the FULL [1, eff_total] range so
+                # bundle rows for length-OOD numbers (n > N) also receive
+                # last-digit gradient — this is what enables §7.5
+                # length extrapolation.
+                ld_batch = [rng_np.randint(1, eff_total)
+                            for _ in range(batch_size)]
+                ld_ids = [value_to_concept_id(n * step, step) for n in ld_batch]
+                ld_tgt = torch.tensor(
+                    [n % 10 for n in ld_batch], device=DEVICE
+                )
+                ld_logits = head_lastdigit(
+                    ld_ids, cg, tick=epoch * 10000 + step_i,
+                )
+                loss = loss + F.cross_entropy(ld_logits, ld_tgt)
+
             opt.zero_grad(); loss.backward(); opt.step()
 
-    # Read bundle_by_grid_idx
+        if (
+            sleep_every is not None
+            and epoch > sleep_warmup
+            and epoch % sleep_every == 0
+        ):
+            report = run_sleep_pass(
+                cg,
+                optimizer=opt,
+                facets=["arithmetic_bias"],
+                config=SleepConfig(
+                    k_clusters=sleep_k_clusters, replay_steps=0,
+                    seed=seed + epoch,
+                    anchor_ema=sleep_anchor_ema,
+                    assignment=sleep_assignment,
+                    soft_tau=sleep_soft_tau,
+                ),
+                tick=epoch * 10000 + 9999,
+                force_recluster=sleep_force_recluster,
+            )
+            sleep_reports.append(report.to_dict())
+
     bundle_by_idx: dict[int, torch.Tensor] = {}
-    for i, v in enumerate(grid_vals):
-        cid = value_to_concept_id(v, step)
-        bundle_by_idx[i + 1] = cg.concepts[cid].bundle.state_dict()[
-            "params.arithmetic_bias"
-        ].detach().cpu().clone()
+    use_abs_now = (
+        use_abstract
+        and getattr(cg, "sleep_enabled", False)
+        and "arithmetic_bias_residual" in cg.bundle_pool
+    )
+    if use_abs_now:
+        from pcm.sleep import collapse_via_abstract
+        ids = [value_to_concept_id(v, step) for v in grid_vals]
+        with torch.no_grad():
+            rows = collapse_via_abstract(
+                cg,
+                caller="QuadArithHead.eval",
+                facet="arithmetic_bias",
+                concept_ids=ids,
+                shape=(BIAS_DIM,),
+                tick=epochs * 10000 + 99999,
+                init="normal_small",
+                device=DEVICE,
+                assignment=sleep_assignment,
+                soft_tau=sleep_soft_tau,
+            ).detach().cpu()
+        for i, _v in enumerate(grid_vals):
+            bundle_by_idx[i + 1] = rows[i].clone()
+    else:
+        for i, v in enumerate(grid_vals):
+            cid = value_to_concept_id(v, step)
+            bundle_by_idx[i + 1] = cg.concepts[cid].bundle.state_dict()[
+                "params.arithmetic_bias"
+            ].detach().cpu().clone()
 
     return {
         "head": head, "cg": cg, "centroids": centroids,
         "bundle_by_idx": bundle_by_idx, "grid_vals": grid_vals,
         "step": step, "N": N, "seed": seed,
+        "sleep_reports": sleep_reports,
     }
 
 
@@ -323,10 +508,14 @@ def _stats(xs: list[float]) -> dict:
 def run_one(
     N: int, step: float, ood_ratio: float, n_seeds: int,
     epochs: int, steps_per_epoch: int,
+    *,
+    sleep_every: int | None = None,
 ) -> dict:
     all_triples = enumerate_triples(N, step)
     by_op_counts = {op: len(trips) for op, trips in all_triples.items()}
     print(f"  triples per op: {by_op_counts}")
+    if sleep_every is not None:
+        print(f"  Tier-G sleep enabled, every {sleep_every} epoch(s)")
 
     per_seed_rows = []
     bundles_by_seed: dict[int, dict] = {}
@@ -349,6 +538,7 @@ def run_one(
             N, step, seed,
             train_triples=train_triples,
             epochs=epochs, steps_per_epoch=steps_per_epoch,
+            sleep_every=sleep_every,
         )
         train_acc = eval_on_triples(
             r["head"], r["cg"], r["centroids"], train_triples, step
@@ -432,6 +622,10 @@ def main() -> None:
     ap.add_argument("--ood-ratio", type=float, default=0.15)
     ap.add_argument("--out", type=Path, default=Path("outputs/quad_study"))
     ap.add_argument("--smoke", action="store_true")
+    ap.add_argument(
+        "--sleep-every", type=int, default=None,
+        help="Tier-G: run pcm.sleep.run_sleep_pass every N epochs (default: off)",
+    )
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
@@ -450,6 +644,7 @@ def main() -> None:
         "n_seeds": args.n_seeds,
         "ood_ratio": args.ood_ratio,
         "step": args.step,
+        "sleep_every": args.sleep_every,
         "by_config": {},
     }
 
@@ -461,7 +656,8 @@ def main() -> None:
         print("=" * 72)
         cfg_key = f"N={N},step={args.step}"
         summary["by_config"][cfg_key] = run_one(
-            N, args.step, args.ood_ratio, args.n_seeds, epochs, steps
+            N, args.step, args.ood_ratio, args.n_seeds, epochs, steps,
+            sleep_every=args.sleep_every,
         )
 
     (args.out / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False))

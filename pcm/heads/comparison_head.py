@@ -60,18 +60,14 @@ class ComparisonHead(nn.Module):
         cg: "ConceptGraph",
         tick: int,
     ) -> torch.Tensor:
+        """Dense-pool fast path; see ``ArithmeticHeadV2._collapse_bias_batch``."""
         device = next(self.parameters()).device
-        rows: list[torch.Tensor] = []
-        for cid in concept_ids:
-            if cid not in cg.concepts:
-                raise KeyError(f"concept {cid!r} not in ConceptGraph")
-            cc = cg.concepts[cid].collapse(
-                caller=CALLER,
-                facet=FACET_NAME,
-                shape=(self.facet_dim,),
-                tick=tick,
-                init="normal_small",
-                device=device,
-            )
-            rows.append(cc.as_tensor())
-        return torch.stack(rows, dim=0)
+        return cg.collapse_batch(
+            caller=CALLER,
+            facet=FACET_NAME,
+            concept_ids=concept_ids,
+            shape=(self.facet_dim,),
+            tick=tick,
+            init="normal_small",
+            device=device,
+        )

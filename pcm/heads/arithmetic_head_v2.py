@@ -1,13 +1,17 @@
-"""arithmetic_head_v2.py — D91/D92 的 AddHead 重构版.
+"""arithmetic_head_v2.py — D91/D92 的 AddHead.
 
-与 v1 ``arithmetic_head.py`` 的关键区别: v2 的 forward **只**消费 ConceptNode
-bundle 里的 ``arithmetic_bias`` facet + operation one-hot; 原来接受的感知
-embedding (``emb_a``, ``emb_b``) 在 forward 里**被忽略**. 这是为了满足
-D91/D92 的 "指纹归因" 硬约束 — 所有 concept-specific 信息必须通过图谱的参数
-bundle 流动, backbone 不得走私.
+forward **只**消费 ConceptNode bundle 里的 ``arithmetic_bias`` facet + operation
+one-hot; 接受的感知 embedding (``emb_a``, ``emb_b``) 在 forward 里**被忽略**,
+保留只是为了与历史调用方签名兼容. 这是为了满足 D91/D92 的 "指纹归因" 硬约束 ——
+所有 concept-specific 信息必须通过图谱的参数 bundle 流动, backbone 不得走私.
 
-这个设计是在 H1-H3 ablation tests 失败后修复的, 见
-``mind/docs/research/PARAMETRIC_CONCEPT_MEMORY.md`` §"Ablation-Induced Redesign".
+设计的来由 (旧版 D88 head 走 emb_a/emb_b 走私通路, H1-H3 ablation tests 失败)
+见 ``mind/docs/research/PARAMETRIC_CONCEPT_MEMORY.md`` §"Ablation-Induced
+Redesign".
+
+Tier-D 等价物: ``pcm/heads/cook_wrappers.py::build_arith_v2_cook(cg, head)``,
+返回的 cook 子图与本 forward bit-identical (claim D1, see
+``tests/test_cook_all_heads.py``).
 """
 from __future__ import annotations
 
@@ -67,18 +71,20 @@ class ArithmeticHeadV2(nn.Module):
         cg: "ConceptGraph",
         tick: int,
     ) -> torch.Tensor:
+        """Dense-pool fast path: single ``F.embedding`` over the whole batch.
+
+        D93 invariant: bit-identical to the legacy ``for cid in ids: ...
+        torch.stack(...)`` pattern — same row data, same autograd graph,
+        same per-row gradient accumulation. Avoids B Python-level dict
+        lookups and one ``stack`` per call.
+        """
         device = next(self.parameters()).device
-        rows: list[torch.Tensor] = []
-        for cid in concept_ids:
-            if cid not in cg.concepts:
-                raise KeyError(f"concept {cid!r} not in ConceptGraph")
-            cc = cg.concepts[cid].collapse(
-                caller=CALLER,
-                facet=FACET_NAME,
-                shape=(self.bias_dim,),
-                tick=tick,
-                init="normal_small",
-                device=device,
-            )
-            rows.append(cc.as_tensor())
-        return torch.stack(rows, dim=0)
+        return cg.collapse_batch(
+            caller=CALLER,
+            facet=FACET_NAME,
+            concept_ids=concept_ids,
+            shape=(self.bias_dim,),
+            tick=tick,
+            init="normal_small",
+            device=device,
+        )

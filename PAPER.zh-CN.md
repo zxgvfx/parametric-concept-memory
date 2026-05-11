@@ -378,6 +378,175 @@ PCM 自动适配四种质性不同的拓扑：线性、圆形、格点和类别�
 
 ![F8 空间网格 MDS：trained vs shuffled-identity 反事实](./docs/figures/F8_space_mds_trained_vs_shuffle.png)
 
+### 6.6 Tier-G — Sleep Abstraction（睡眠抽象）
+
+§4–§6 的几何完全在 wake-time SGD 训练下涌现。一个自然的继承问题是：**当训练完成后，能否离线地把同一个 `bundle_pool` 重新组织成「prototype + 个性化残差」的形式，而不损害下游任务？** 这正是认知科学里 systems consolidation 的功能（hippocampal indexing → cortical schema, *Klinzing et al. 2019, Sun et al. 2023, Nat. Neurosci.*）。
+
+我们在 PCM 上实现一个**可证伪**的 sleep pass（实现：`pcm.sleep`）：
+
+1. **Phase A — snapshot**：在 `torch.no_grad` 下复制每个 facet 上的活跃行 `R = pool[active_slots]`。
+2. **Phase B — k-means**：在 `R` 上跑 cosine k-means，得到 *k* 个 centroid。
+3. **Phase C — register**：每个 cluster 注册一个 `abstract_prototype` 节点，并把 `residual = row - centroid` 写到一个新 facet `<facet>_residual`。同时为每个 (anchor, member) 注册一个 cookable 子图 `concept.relation_apply(@anchor, @residual, "add")`。
+4. **Phase E — replay**（可选）：用一个 ring buffer 重放最近的 batch，并对 prototype slot 与 residual facet 做 hard gradient mask（保护抽象状态）。
+
+我们形式化六条不变量并在 `tests/test_tier_g_sleep.py` 上 unit-test：
+
+| ID | 不变量 |
+|---|---|
+| **G1** | 不调用 `attach_sleep` 时 forward bit-identical 于 §4–§6 |
+| **G2** | `replay_steps=0` 时活跃行字节级不变（pool memory safety）|
+| **G3** | 在 §4 N=7 上 ρ_linear 不退化超过 0.05 absolute |
+| **G4** | 每个 cluster 的 anchor 严格等于其成员行的均值 |
+| **G5** | `cook(rel) ≈ 原行` 数值误差 < 1e-5 |
+| **G6** | 第二次 `run_sleep_pass` 在 `force_recluster=False` 下是 no-op |
+| **G7** | 在 sleep 后立刻读 `collapse_via_abstract` 与 `collapse_batch` 数值相等 |
+
+G7 是后加的（V3 ablation 揭示其必要性，见下）。所有 7 条在 63/63 unit test 中成立。
+
+**让 head 真正消费抽象**：仅做 phase A–C 时 forward 路径没改变，sleep 是 read-only snapshot。我们提供 `collapse_with_optional_abstract`，head 在 `use_abstract=True` 时把每个 member 的读取改为 `anchor + residual`，让梯度同时流经共享 anchor 与个体 residual——这是把 sleep 变成 **functional schema** 而非档案的关键一步。
+
+#### 6.6.1 失败模式与四个文献对应病因
+
+我们在 quad N=30 上做 ABC ablation：A = no sleep；B = sleep + 直接读；C = sleep + abstract read。早期实现下 C 路径出现高方差塌缩（ρ_log std=0.268，是 baseline 的 50×）。我们把它对照主流文献后识别出四类病因：
+
+| 我们的症状 | 文献已知名字 | 修复 |
+|---|---|---|
+| `force_recluster=True` 时 std=0.268 | VQ-VAE *codebook collapse / topology hop* (Zheng ICCV 2023) | EMA anchor blend (`anchor_ema < 1`) |
+| OOD ↓5% | k-clusters 太粗的 *information bottleneck* (VQGAN-LC, NeurIPS 2024) | k 接近 N |
+| anchor 永远停留在第一次 sleep | *loss of plasticity* (Sutton 2024 Nature) | 多轮 sleep + EMA |
+| 未选中 anchor 饿死 | MoE *expert starvation* (SparseMixer 2024; Default MoE 2025) | soft assignment（softmax routing 把梯度分散到所有 anchor） |
+
+`SleepConfig` 里 `anchor_ema / assignment / soft_tau` 三个参数依次对应解法 A1 / S2 / soft routing。
+
+#### 6.6.2 Quad domain 上的 Pareto-better 结果
+
+固定配置：`k = N-2 = 28`，`assignment="soft"`，`τ=0.1`，`sleep_warmup=12`，`sleep_every=4`，5 seed。
+
+| 设置 | A ρ_log | C ρ_log | Δρ | A 任务 / OOD | C 任务 / OOD | ΔOOD |
+|---|---|---|---|---|---|---|
+| OOD 0.15 (训练充分) | +0.774 ± 0.013 | +0.780 ± 0.022 | **+0.006** | 0.954 / 0.636 | 0.952 / 0.643 | **+0.007** |
+| **OOD 0.30 (非饱和)** | **+0.775 ± 0.035** | **+0.780 ± 0.038** | **+0.004** | **0.926 / 0.523** | **0.925 / 0.541** | **+0.018** |
+| OOD 0.50 (过难) | +0.699 ± 0.065 | +0.694 ± 0.061 | -0.006 | — / 0.240 | — / 0.243 | +0.003 |
+
+OOD 0.30 给出最强信号：5 seed 上 4/5 严格 ΔOOD > 0，平均 +0.018（OOD baseline 0.523）。这与 Sun et al. (2023, *Nat. Neurosci.*) 「memories consolidate when doing so aids generalization」的预测对齐——sleep 收益在中等难度泛化区最大，过简单（饱和）或过难（系统在乱猜）时都被压平。
+
+#### 6.6.3 跨四领域 5 seed 安全性
+
+`k≈N-2, soft τ=0.1` 同一配置跑 number / color / space / phoneme 各 5 seed，OOD=0.3：
+
+| domain | A 任务 ± std | C 任务 ± std | Δ任务 | Δρ | ΔOOD |
+|---|---|---|---|---|---|
+| number | 0.926 ± 0.018 | 0.925 ± 0.016 | -0.001 | **+0.004** | **+0.018** ✅ |
+| color | 1.000 ± 0.000 | 1.000 ± 0.000 | 0.000 | +0.001 | -0.033 |
+| space | 1.000 ± 0.000 | 1.000 ± 0.000 | 0.000 | +0.015 | -0.032 |
+| phoneme | 1.000 ± 0.000 | 1.000 ± 0.000 | 0.000 | +0.003 | (N/A) |
+
+**两条可写入论文的 claim**：
+
+1. **Tier-G 安全性**：4/4 域上任务准确率不发生统计意义上的回退（max Δ = -0.002，within 1 σ）。改进 1 + EMA + soft routing + warmup 后 G1–G7 七条不变量在 63/63 unit-test 上成立。
+2. **OOD-Pareto-better 在 task 难度匹配时成立**：number 域 OOD=0.3 5 seed 上 ΔOOD=+0.018，Δρ=+0.004，4/5 seed 严格双正。color/space 的 OOD baseline 已经低（0.61 / 0.18），说明这两个域的 mixing/move 任务**不是 inductive generalization benchmark**，OOD hold-out 主要是 memorization 检测；该限制是任务设计而非 sleep 算法本身。
+
+值得二阶观察的是 ρ 方差缩小：**color 域 sleep 让 5 seed 的 ρ std 从 0.008 缩到 0.003**（38% of baseline），与 *Klinzing et al. 2019* 的「systems consolidation 减小表征方差」预测吻合。
+
+![F9a 四域 ρ 对比 (5 seeds, OOD=0.30)](./docs/figures/F9_sleep_four_domain_rho.png)
+
+![F9b 四域 train + OOD 准确率 (5 seeds, OOD=0.30)](./docs/figures/F9_sleep_four_domain_acc.png)
+
+#### 6.6.4 局限与下一步
+
+* OOD-Pareto-better 当前仅在 number 一个域上严格成立；color/space 任务对 inductive generalization 不敏感，需要更难的迁移 / few-shot benchmark 才能严肃验证 sleep 的下游收益。
+* phoneme 每轴 N=2/4/4 太小，sleep 几乎是 identity；要测 cross-language 迁移才能进 [Sun 2023] 的 generalization-conditional consolidation 框架。
+* Phase E replay 的代码路径已实现但 4 域实验里跑的是 `replay_steps=0`；下一篇拟做 long-run continual-learning ablation。
+* 当前 sleep 是「单次 + warmup」最稳；多次 sleep 配合 EMA 在大 N 上的稳定性还是开放问题。
+
+PCM 的 Tier-G 因此**不声称** sleep 普世改善 PCM；它声称：(i) 严格 G1–G7 安全；(ii) 在 task-difficulty 匹配的非饱和域上拿到 5-seed 双正信号；(iii) 失败模式被四类主流文献病因清晰解释，并给出对应 fix。这让 sleep abstraction 从一个 hand-wave 比喻变成一个**可调、可证伪、可与文献对应**的子模块。
+
+### 6.7 Sleep does *not* invent perceptual primitives（负结果）
+
+§7 的 base-10 negative 测试 wake-time SGD 是否会自发涌现人类计数系统的 base-10 因式结构（结论：不会）。一个对称的问题适用于 sleep：颜色域 N=12 hue 上跑 sleep abstraction，*k* 个 anchor 会不会重现人类视觉系统的 perceptual primaries（RGB / CMY / RYB / CMYK / 冷暖二分）？
+
+**两个相互竞争的假说**：
+
+* **H_perceptual**：sleep 的 codebook compression 自动恢复某种 colour-vision-like prior（比如 k=3 时落在 RGB hue {0,4,8}；k=4 时落在 CMYK hue {0,3,6,9}）。这会暗示 PCM 偷偷有色觉先验。
+* **H_taskSym**：sleep 完全 cyclic-equivariant：anchor 落在 *k* 个等距 hue（间距 360°/k），但起始 offset 完全由 seed 决定，跨 seed 在 *k* 个旋转 class 上近似均匀分布。任何「perceptual prior 命中」必然只是「严格等距 + 那个 rotation class 恰好等于命名常量」的同义词。
+
+我们在 `experiments/sleep_inspect_color_anchors.py` 上跑 *k* ∈ {3, 4, 6}，每 *k* 8 seed（30 epochs × 200 steps，warmup=15，sleep_every=5）。每个 seed 我们记录：anchor 的最近 hue 索引、spacings、是否严格等距、是否命中五个 perceptual prior（RGB / CMY / RYB / CMYK_aligned / WarmCool6，每个都做 mod-12 旋转检查）。
+
+| *k* | 严格等距 seed 数 | 命中 RGB | 命中 CMY | 命中 RYB | 命中 CMYK_aligned | 命中 WarmCool6 |
+|---|---|---|---|---|---|---|
+| 3 | **2/8** (rotation class 3) | 2/8 | 2/8 | **0/8** | — | — |
+| 4 | **1/8** (rotation class 0) | — | — | — | 1/8 | — |
+| 6 | **1/8** (rotation class 1) | — | — | — | — | 1/8 |
+
+观察：
+
+1. **每一个非平凡 prior 命中数都恰等于严格等距 seed 数**。也就是说，「PCM 命中 RGB」是「PCM 当前 seed 严格 120° 等距 *且* 旋转 class 恰好是 0 mod 4」的别名——没有任何 prior 比「严格等距」本身更高。
+2. **唯一不属于等距集合的 prior（RYB={0,2,8}，spacings=[2,6,4]）在 8 seed × 3 个 *k* = 24 次实验中 0 次命中**。如果 PCM 有任何 perceptual color prior，RYB（painter primaries）应该至少偶尔出现；它没有。
+3. **6/8 (k=3)、7/8 (k=4)、7/8 (k=6) 的 seed 不严格等距**，spacings=[3,4,5] 或 [2,3,3,4] 之类，max hue deviation ≤ 1-2。这是 cosine k-means 在 64-d bundle 空间上跑而不是在严格 12-mod 角度坐标上跑的预期 artefact，跟 perceptual prior 无关。
+
+这与 §7 的 base-10 negative 形成精确的镜像：
+
+| 实验 | wake / sleep | 测试是否涌现 | 涌现指标 | 结果 |
+|---|---|---|---|---|
+| §7 Base-10 | wake-time SGD | 人类计数系统的 base-10 因式 | spike_10 / column-MLP probe | **不涌现** |
+| §6.7 Color primaries | sleep abstraction pass | 人类视觉系统的 perceptual primaries | prior hit rate vs equidistant baseline | **不涌现** |
+
+**联合 claim**：PCM 既不在 wake 也不在 sleep 阶段引入任务结构以外的人类先验。它只放大任务代数赋予的对称性。当任务对一组旋转完全等价（color domain 的 cyclic mixing）时，sleep abstraction 给出的是该旋转群的 *任意一个* 等距代表元，而不是某个有特殊物理意义的代表元。
+
+这条边界对 PCM 的可解释性主张很重要：
+
+* **正向**：bundle 几何反映任务，不反映监督模态或概念命名（H5″）。
+* **反向**：sleep 的 anchor 也反映任务，不反映人类感知器官的物理偏好。
+
+如果未来要让 sleep 真正生成 perceptual-like primaries（RGB），必须把那个偏好从外部注入——例如用 LMS-cone-derived centroid 替换 random orthogonal centroid，或在 mixing triples 里加一个非对称采样偏置。这是 §6.8 的内容。
+
+### 6.8 注入「人类三层因果」后 PCM 是否恢复 RGB-like primaries？
+
+§6.7 把人类三原色不浮现归因于「PCM 没有人类色觉系统的三层因果」。本节做正向验证：**逐层注入这三层因果，sleep 是否就开始恢复 RGB-aligned anchor？**
+
+人类三原色的三层因果链（[Stockman & Sharpe 2000](https://www.sciencedirect.com/science/article/abs/pii/S0042698999001216); [Jacobs 2009](https://www.cell.com/current-biology/fulltext/S0960-9822(09)01345-2); [Conway et al. 2007](https://www.cell.com/neuron/fulltext/S0896-6273(07)00779-3); [Berlin & Kay 1969](https://en.wikipedia.org/wiki/Basic_Color_Terms:_Their_Universality_and_Evolution)）：
+
+| 层 | 内容 | PCM 对应 |
+|---|---|---|
+| **1 物理硬件** | 视网膜 3 种 opsin (L/M/S) | `make_lms_like_centroids` 用 3 个正交 cone basis × hue cosine 响应 |
+| **2 环境统计** | 自然光谱 + 觅食压力 | `mix_sample_weight = green_peak`（hue 4 邻域采样高 4×）|
+| **3 任务驱动** | 红绿区分 → 找熟果适应度 | `RipeFruitHead`：binary head，ripe = hue ∈ {0, 1, 11} |
+
+**5-condition × 8-seed ablation**（k=3 sleep, warmup=15, every=5；脚本 `experiments/sleep_color_primaries.py`）：
+
+| 条件 | 严格 EQUI | RGB hit | red-wedge anchor |
+|---|---|---|---|
+| **A** baseline (random centroid + 均匀 + 无 ripe) | 2/8 | 2/8 | 0.62 |
+| **B** + LMS centroid | **4/8** | **4/8** | 0.75 |
+| **C** + green-peak sampling | 3/8 | 3/8 | 0.75 |
+| **D** + ripe-fruit head | 3/8 | 3/8 | **1.00** |
+| **B+C+D** combined | **4/8** | **4/8** | **1.00** |
+
+「red-wedge anchor」= 该 seed 的 3 个 anchor 中至少有一个落在 {0, 1, 11}（红色三邻域）。
+
+**三个核心观察**：
+
+1. **任务驱动（D）是最强的对称性破坏力**。仅加一个 binary ripe-fruit head 就把 red-wedge anchor 从 0.62 推到 8/8 = 1.00：每一个 seed 都有 anchor 落在红色邻域。这与 [Jacobs 2009] 关于「红绿区分提升找熟果适应度 → 驱动 L/M cone 分化」的演化假说一致——任务级非对称是把感知系统从对称分布推向 categorical primaries 的 *causal* 力量。
+
+2. **硬件先验（B）单独不足以打破对称**：LMS centroid 把 EQUI 率从 2/8 提到 4/8（+50%），但仍然只有约一半 seed 落在严格 120° 等距，而且具体 rotation class 仍随 seed 移动（rotation class {3:3, 0:1}）。原因：mixing 任务的 cyclic equivariance 是一个强对称力，会把 hue 的几何**重新均匀化**，部分擦除 centroid 注入的 LMS 偏置。这与 [Conway et al. 2007] 的 V4 hue-selective neuron 数据一致——cone-level prior 只规定了 sampling，最终 categorical structure 还是要靠 task 来拣选。
+
+3. **BCD 联合得到双重峰值**：EQUI = 4/8 + red-wedge = 1.00。任何一层单独不够，三层叠加把 PCM 的几何从「任意 rotation class 等距」推到「严格落在红色锚定 + LMS-aligned」。这正好对应人类色觉的真实演化路径：cone 突变（B）+ 嫩叶 / 熟果 chromatic statistics（C）+ 觅食压力（D）共同造就了 perceptual primaries。
+
+**对 §6.7 与 §6.8 的联合 claim**：
+
+| 段 | 测试 | 结果 |
+|---|---|---|
+| §6.7 | 纯任务对称 + 无先验 | RGB **不浮现**（H_perceptual 反驳）|
+| §6.8 | 三层因果逐一注入 | RGB-aligned anchor **可被驱动**，强度 D ≫ B > C |
+
+这不只是一个 ablation，更是一个**计算认知科学的因果声明**：
+
+> PCM 不会自发发明 perceptual primaries，但**它会忠实保留任何带任务非对称性的先验**。三原色不是从 cyclic mixing task 上凭空涌现的，而是要么从生物硬件层（LMS cone）注入，要么从生态压力层（觅食区分）驱动。当代人类的 RGB 命名既不是任务的产物也不是 cone 的产物——是两者的**因果合谋**。
+
+注意 §6.8 的实验也帮 PAPER §3.6 (我们故意延后的"几何怎么从 task 中浮现"问题) 加了一条边界：**几何只反映 task 的对称群**。如果 task 给出的对称群 = full cyclic（如本研究的 mixing），结果是 cyclic-equivariant 的等距 anchor；如果 task 引入显式 wedge（如 ripe-fruit head 的 {0,1,11}），结果是带 wedge 的非对称 anchor。这给 PCM 一个**严格可证伪的对称性原理**：anchor 拓扑 = 任务对称群的 minimal nontrivial 表示。
+
+![F11 §6.8 三层因果 ablation：左 = 监督几何打破对称（EQUI），右 = 任务驱动打破对称（red-wedge anchor）](./docs/figures/F11_color_primaries.png)
+
 ---
 
 ## 7 实验 4 — 纯 Base-10 涌现（负结果）
@@ -408,6 +577,130 @@ PCM 自动适配四种质性不同的拓扑：线性、圆形、格点和类别�
 PCM 会诱导出解决任务所足够的 **pairwise geometry**（加法为线性，混色为圆形）。它不会诱导 **algorithmic factorisation**（个位、十位、进位），原因是：(i) 对 random orthogonal centroid 的 cross-entropy 除了 unique directions 外不奖励结构，(ii) 64-d 平坦 `ParamBundle` 没有 factorisation prior，(iii) 纯语义监督没有视觉压力（例如 "12" 与 "32" 之间共享像素）。这是 PCM 当前形式的一个 **清晰经验边界**，有助于校准期待并推动后续工作（视觉 glyph 输入、slot priors、curriculum）。
 
 手写 base-10 prior 确实能解锁 100% digit-length extrapolation（见 D93a / `COMPOSITIONAL_NUMBER_STUDY.md`），与 Abacus embeddings 相当，但数据少约 10³×；代价是把 base-10 写进架构，而不是让它被学出来。
+
+### 7.4 三层因果注入反转 §7 negative
+
+§7 的 base-10 null 不是 PCM 的本质局限——它只意味着"在缺乏先验、统计、任务任意一层的情况下，base-10 不会从对称四则运算中浮现"。§6.8 已经在颜色域证明了相反方向：注入 (B 视锥-like centroid) + (C 生态采样) + (D 觅食 binary head) 会让 RGB-aligned anchor 涌现。本节把同样的三层因果协议搬到数字域，反转 §7 negative。
+
+**操作化（脚本：`experiments/sleep_number_decimal.py`）**：
+
+| 层 | 数字域操作化 |
+|---|---|
+| **B 硬件先验** | `make_decimal_cone_centroids`：10 个 unit cones + 10 个 tens cones，正交于 dim=128，数字 *n* 在 cone[n%10] 上有 weight 1.0、cone[10 + n//10] 上有 weight 0.5 |
+| **C 生态统计** | `round_number_weights(boost=5.0)`：multiples of 10 采样权重 ×5，模拟人类语言里 round number 的 Zipf 偏好 |
+| **D 任务驱动** | `LastDigitHead`：单输入 binary classifier，predicts `n % 10`（10-class），消费同一 `arithmetic_bias` facet |
+
+**8 seed × 5 condition 完整结果**（N=30，30 epochs × 240 steps/epoch，sleep k=10 让 anchor 数等于 last-digit equivalence class 数）：
+
+| 条件 | spike₁₀ ± std | units_gap ± std<br>cos[+10]−cos[+1] | last-digit purity ± std |
+|---|---|---|---|
+| **A** baseline (random + 均匀 + 无 head) | +0.290 ± 0.042 | −0.157 ± 0.056 | 0.445 ± 0.052 |
+| **B** + decimal cones | +0.355 ± 0.040 | −0.093 ± 0.081 | 0.491 ± 0.058 |
+| **C** + round-number sampling | +0.384 ± 0.067 | −0.044 ± 0.093 | 0.483 ± 0.062 |
+| **D** + last-digit head | **+0.667 ± 0.052** | **+0.467 ± 0.064** | **0.744 ± 0.073** |
+| **B+C+D** combined | **+0.684 ± 0.038** | **+0.559 ± 0.045** | **0.876 ± 0.085** |
+
+「units_gap」= avg cos(*n*, *n*+10) − avg cos(*n*, *n*+1)。**baseline 是负**（线性几何里相邻数字最近），**D 与 BCD 翻成正**（同 units 数字比相邻数字更像，符号翻转 = base-10 column structure 的直接证据）。
+
+**三个核心观察**（与 §6.8 完全平行）：
+
+1. **任务驱动（D）是最强的对称性破坏力**。仅加一个 single-input last-digit head 就把 spike₁₀ 翻倍（+0.290 → +0.667），units_gap 符号翻转，purity 从 0.445 升到 0.744。这跟 §6.8 中 ripe-fruit head 把 red-wedge 0.62 → 1.00 是同一种现象。
+
+2. **硬件先验（B）单独不足**。decimal-cone centroid 把 spike₁₀ 提到 +0.355（仅 +0.065 over baseline）。原因和 §6.8 颜色域 LMS centroid 不足一样：四则运算的加性 / 序数对称性是强对称力，会把 hue 行重新均匀化，部分擦除 centroid 注入的 base-10 偏置。
+
+3. **BCD 联合让 spike₅ 收紧到 0**。`spike_5` 在 baseline 是 −0.370，在 BCD 是 −0.072 ± 0.092（接近 0）。`spike_10` 同时维持在 +0.684。`spike₁₀ ≫ spike₅` 与 spike₅ ≈ 0 联合 = **干净的 10-周期性**——这是 §7 negative 想找而没找到的现象。最干净的 base-10 column structure 出现在 BCD 联合条件，而不是任意一层单独。
+
+**与 §6.8 的对称双正**：
+
+| 域 | 对称性 | D 单独最强信号 | BCD 联合最强信号 |
+|---|---|---|---|
+| 颜色（§6.8）| cyclic on hue ring | red-wedge anchor 0.62 → 1.00 | EQUI = 4/8 + red-wedge = 1.00 |
+| 数字（§7.4）| linear on number line | spike₁₀ +0.29 → +0.67<br>units_gap −0.16 → +0.47 | spike₁₀ = +0.68 + spike₅ ≈ 0<br>last-digit purity 0.88 |
+
+**Trade-off 也对称**。BCD 在 OOD acc 上会有损失（A: 0.82, BCD: 0.74）：bundle 几何被强烈推向 base-10 column 后，与 OOD 上的"加法预测准确性"产生分离。这跟 §6.8 颜色域 OOD 趋势一致——任务-asymmetric prior 提升结构干净度但不一定提升 task acc。这正是 §6.6.2 "ρ↔OOD trade-off" 在算法-涌现 contexts 下的对应。
+
+**§7 / §7.4 联合 claim**：
+
+> §7 negative 不是 PCM 的局限，而是关于"什么样的因果链能产生什么样的算法表征"的 *诊断信号*。base-10 column structure 不会从对称四则运算上凭空涌现（§7），但**给系统一个 single-input last-digit task，结构在 8/8 seed 上以 spike₁₀ = +0.67 的强度涌现（§7.4）**。这跟人类儿童学算术的实证文献一致 —— 学龄前儿童在没有数位概念的情况下能做加减但不会自发抽出"个位 / 十位"的范畴；这种范畴抽象普遍要到学校教育（一种 last-digit-like 的强任务信号）才稳定建立（[Geary 2011 *Dev Psychol*]; [Siegler & Lortie-Forgues 2014 *Curr Dir Psychol Sci*]）。
+
+§7.4 与 §6.8 共同支撑 PCM 的核心 claim：**representational primitives 反映的是任务的对称群加上注入的非对称先验，没有别的来源**。在颜色和数字两个完全不同的域，三层因果协议给出**完全平行的反转**——这是 PCM 作为 falsifiable computational testbed 的最强证据。
+
+![F12 §7.4 三层因果反转 base-10 negative：左 = spike₁₀, 中 = units_gap 符号翻转, 右 = last-digit cluster purity](./docs/figures/F12_number_decimal.png)
+
+### 7.5 长度外推 — 测试 D93 级架构的诚实边界
+
+§7.4 在 N=30 内部把 base-10 column structure 重建出来。一个更严苛的问题：**注入的 base-10 先验能否让 PCM 把算术能力从训练范围 [1, 30] 外推到 [31, 100]？** 这对应人类儿童学完两位数加减法后不需重新学就能做三位数加法的能力。
+
+**Setup**（脚本：`experiments/sleep_number_extrapolate.py`）：
+- 注册 1..100 全集（concept registry 容量 100）
+- `QuadArithHead` 训 a, b, c ≤ 30 内的 triples（baseline 任务）
+- `LastDigitHead`（D / BCD condition）从 [1, 100] **全集**采样，让 31..100 的 bundle row 至少在 last-digit 维度上接收梯度
+- centroid 模式：`random` 或 `decimal_cones`（提供 31..100 的 cone projection prior）
+
+**Test splits**：
+- `in_range`：随机 hold-out 训练范围内的 triples（§7.4 baseline）
+- `length-100`：a > 30 OR b > 30，且 a, b, c ≤ 100 的 triples（length extrapolation）
+
+**5 condition × 5 seed 结果**（N_train=30, N_total=100）：
+
+| 条件 | in-range OOD ± std | length-100 OOD ± std |
+|---|---|---|
+| **A** baseline (random + 均匀 + 无 head) | 0.786 ± 0.054 | 0.051 ± 0.000 |
+| **B** + decimal cones | 0.506 ± 0.058 | 0.051 ± 0.000 |
+| **C** + round-number sampling | 0.657 ± 0.064 | 0.051 ± 0.000 |
+| **D** + last-digit head | 0.639 ± 0.049 | 0.055 ± 0.001 |
+| **B+C+D** combined | 0.664 ± 0.084 | **0.062 ± 0.003** |
+
+「length-100 OOD」chance level ≈ 1/100 = 0.01；观察值 0.051 反映了 head 在 OOD 上的系统性偏置（总是预测同一个目标 ≈ 5% 命中），而不是真实泛化。
+
+**三个观察**：
+
+1. **A/B/C 严格在 chance 水平（0.051 ± 0.000）**。仅有 centroid prior（B）或 sampling bias（C）不能支持长度外推——这与 §7.4 in-range 上 B / C 单独的弱信号一致。
+2. **D / BCD 提升 statistically detectable but small**：BCD 从 0.051 推到 0.062（+1.1pp），5/5 seed 严格 BCD > D > A，std=0.003 极紧 → 信号是真实的，绝对值是小的。
+3. **PCM 当前架构的一个清晰边界**：`QuadArithHead` 的 forward pass 必须从 bundle row 计算 `a + b`，但 31..100 的 bundle row 在 quad task 上**从未接收过梯度**。即使 `LastDigitHead` 注入了 last-digit 维度（cone[d]），`QuadArithHead` 仍要学会"如何把 cone[d] 与 cone[tens] 组合算 a + b"，而它在 31..100 上没机会练。
+
+**与 §3.6 / §9 / §7.3 已声明边界的一致性**：
+
+§3.6 已经写明："预测训练中未见过的**单个数字**" 在 D91/D92 不可能：concept bundle 是 per-concept 参数，未注册 concept 根本没 bundle。我们这里通过 `n_total > N` 和 `LastDigitHead` 全集采样**部分缓解**了这个限制，但仍然只能推到接近 chance 的水平。
+
+§9 第二项写："给定 ground-truth concept ID，而非发现它们"。length extrapolation 实际上是**在已知 concept ID 但 head 未训练这些 ID 的情况下**测试 prior 是否足以代偿——答案是「不够」。
+
+§7.3 给出的诊断同样在这里成立：PCM 给出 *几何* 涌现（任务对称群），但不给出 *算法* 涌现（base-10 因式 / 多位数加法）。length extrapolation 需要的不仅是 last-digit identity（D 层提供），还需要 **column-major composition**（"个位相加 + 进位" 的递归算法）——这要么需要 (a) 视觉 glyph grounding，(b) D93a 级别的 slot generator 架构升级，或 (c) 多次组合训练 + curriculum。
+
+**对短文 outstanding question 的最终回答**：三层因果协议在两个 domain 上反转 §6.7 / §7 negative（关于 *几何* 表征），但**不能**反转 length extrapolation negative（关于 *算法* 计算）。这是 PCM 作为可证伪 testbed 的另一个干净边界——把"几何涌现"与"算法涌现"区分清楚，避免认知科学里常见的 conflation。
+
+![F13 §7.5 length extrapolation：5 conditions × {in-range OOD, length-100 OOD}, 5 seeds; A/B/C 严格在 chance, D / BCD 给出 statistically detectable 但小的提升](./docs/figures/F13_number_extrapolate.png)
+
+### 7.5-color 颜色域对应：hue holdout 给出更清晰的 closed-output-set 边界
+
+§7.5 数字 length-OOD 给的 ceiling 是「chance level + 1.1 pp」。颜色域可以做一个更清晰的对应实验：**hold out 一个 target hue**（即所有 `mix(a, b) → c=5` 的 triple 都不在训练集中），然后测 5 condition × 5 seed 上 head 是否能预测 hue 5（脚本：`experiments/sleep_color_holdout.py`）。
+
+**Setup**：N=12 hue 全部注册（concept registry 不变），训练 mixing triples 排除 `c=5` 的所有 ~10 个 triples（约 8% 训练数据），测试 hold-out triples 上 head 的 `argmax` 准确率。Centroid / sampling / head 与 §6.8 5-cell 一致。
+
+**5 condition × 5 seed = 25 实验完整结果**：
+
+| 条件 | train acc ± std | hue 5 hold-out OOD ± std |
+|---|---|---|
+| **A** baseline | 1.000 ± 0.000 | **0.000 ± 0.000** |
+| **B** + LMS centroid | 0.689 ± 0.048 | **0.000 ± 0.000** |
+| **C** + green-peak sampling | 1.000 ± 0.000 | **0.000 ± 0.000** |
+| **D** + ripe-fruit head | 1.000 ± 0.000 | **0.000 ± 0.000** |
+| **B+C+D** combined | 0.711 ± 0.057 | **0.000 ± 0.000** |
+
+**25/25 严格 = 0.000，比 chance 1/12 = 0.083 还低**。这是比数字 length-OOD 更干净的 ceiling：head 的输出层从未在 hue 5 的 centroid 上接收过 positive cosine gradient，所以无论先验如何都**永远不会**预测 hue 5——即使 BCD 的 LMS centroid 把 hue 5 放在 cone basis 投影上、即使 ripe head 给 hue 5 的 bundle row 一个 negative 梯度（push 远离 ripe set），closed-output-set 的限制都让 head 输出空间剪掉了 hue 5。
+
+**两类边界的对照**：
+
+| 实验 | 限制类型 | A baseline | BCD | 解释 |
+|---|---|---|---|---|
+| **数字 length-OOD-100** | Bundle row 没在 task 上训过 | 0.051 ± 0.000 | 0.062 ± 0.003 | 接近 chance, prior 给少量 signal |
+| **颜色 hue holdout** | Head output class 没在 task 上训过 | 0.000 ± 0.000 | 0.000 ± 0.000 | 严格 0, head 永远不输出 holdout class |
+
+数字 length-OOD 的限制在 **input side**（bundle row 缺乏 quad-task 训练），颜色 hue-holdout 的限制在 **output side**（centroid 缺乏 cosine-loss 训练）。两个限制对应 PAPER §3.6 / §9 已声明的 D91/D92 静态边界，是 PCM 作为可证伪 testbed 的一条诚实底线。
+
+**对认知科学的 implication**：人类视觉学习里，孩子见过 hue 5（绿色）作为 mixing 输出后才能在 mix 任务里输出 5。"Hue 5 在 centroid 空间存在但没在任何 task 输出过" 这个 PCM-level 状况，对应人类发展心理学里观察到的现象——婴儿视网膜从早期就已经响应所有 hue（cone 已经成熟），但 categorical color naming 要到 4-6 月稳定，并且与具体语言里有命名词的 hue 高度相关（[Berlin & Kay 1969]; [Skelton et al. 2017 *PNAS*]）。**有 sensory representation 不等于有 task-level identification**。这条 PCM-vs-human 平行不只是隐喻，是一个可量化的对应。
+
+![F14 §7.5-color hue holdout：5 conditions × 5 seeds 全部 ood=0.000，对照数字 length-OOD 的 +1.1 pp 微提升，给出 closed-output-set 边界](./docs/figures/F14_color_holdout.png)
 
 ---
 
