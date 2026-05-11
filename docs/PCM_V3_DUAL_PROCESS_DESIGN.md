@@ -341,28 +341,94 @@ follow-up "adaptive routing" extension that infers the threshold
 from a calibration sweep over post-distill RPE accuracy is
 listed in §9.
 
-## 9. Open follow-ups (after E1–E5 ship)
+## 9. Follow-ups — implemented (F54/F55/F56)
 
-1. **Adaptive routing** — after F53's E4 sleep cache, the RPE's
-   coverage range expands from `train_max` to the cook's success
-   range. Routing should infer the new threshold via a quick
-   calibration sweep (sample a few K, find the largest K where
-   RPE matches ground truth ≥ 0.95). This is the natural
-   companion to E4: phase 2 lets RPE handle bigger displacements,
-   adaptive routing surfaces that capability to the dispatcher.
-2. **Multi-axis successor** — generalise `SuccessorHead` to predict
-   multi-axis steps (Δr, Δc) on the spatial domain; compare with
-   v2 RPE on length-extrapolating spatial OOD.
-3. **Routing learned end-to-end** — replace `train_max_abs_delta`
-   with a small classifier predicting whether RPE will succeed,
-   tested against the A2 finding (does the model learn its own
-   decision threshold without explicit pressure?).
-4. **Cross-domain successor heads** — colour: hue rotation steps;
-   phoneme: feature flips; space: cardinal moves. The same
-   `SuccessorHead` API across all four domains gives a unified
-   System 2 substrate.
-5. **Compare to ALiBi / RoPE on number** — does a functional RPE
-   alone bridge the same gap, or is the dual-process architecture
-   strictly stronger? Predicted: dual-process > ALiBi on
-   cognitive plausibility metrics (E5 RT scaling) even when
-   accuracy is comparable.
+### 9.1 F54 — Adaptive routing (companion to E4)
+
+`pcm.dual_process.calibrate_rpe_coverage(rpe_predict, n_total,
+*, threshold=0.95, sample_size=30, ...)` sweeps `|Δ|` from 1
+to `n_total - 1` and returns the largest K where the RPE's
+predictions match ground truth at ≥ threshold rate. Returned
+to ``route_diff`` as the new ``train_max_abs_delta`` after a
+sleep pass, this surfaces the post-distillation RPE capability
+to the dispatcher.
+
+Empirical (3 seeds × N=100 post-F53 distillation):
+
+| metric | phase1 | phase2 static | **phase2 adaptive** |
+| --- | --- | --- | --- |
+| RPE acc @ K=99 | 0.000 | 1.000 | 1.000 |
+| cook_route_fraction | 0.557 | 0.557 | **0.000** |
+| calibrated threshold | 19 | 19 | **99** |
+
+The dual-process consolidation loop closes end-to-end: cook
+handles OOD → sleep distills cook into RPE → calibration
+detects the broadened RPE → routing falls to RPE entirely.
+
+### 9.2 F55 — Functional RPE vs cook (sinusoidal / ALiBi)
+
+Direct head-to-head on number length-OOD (3 seeds × 15 epochs):
+
+| K | lookup | sinusoidal | ALiBi | **cook** |
+| --- | --- | --- | --- | --- |
+| 19 (train edge) | 1.000 | 1.000 | 0.333 | 0.900 |
+| 25 (first OOD) | 0.000 | 0.000 | 0.000 | 0.908 |
+| 99 | 0.000 | 0.000 | 0.000 | **1.000** |
+
+**Verdict**: functional RPE (sinusoidal continuous basis,
+ALiBi linear-decay bias) **does not solve length-OOD on
+precise arithmetic**. The basis is mathematically defined for
+any Δ, but the classifier downstream has zero training signal
+on classes outside `[−train_max, +train_max]` and stays at
+random init for the rest. The 2026 RoPE-as-phase-modulation
+paper (arxiv 2602.10959) hints at this — RoPE base bounds are
+task-specific. F55 provides the corresponding measurement for
+PCM precise arithmetic.
+
+New API:
+- `pcm.dual_channel.SinusoidalRelativePositionEmbedding(n_axes,
+  embed_dim, base=10000)` — continuous-function basis.
+- `pcm.dual_channel.ALiBiRelativePositionBias(n_axes,
+  init_slope=1.0)` — linear-decay scalar bias.
+
+### 9.3 F56 — Cross-domain SuccessorHead (universal apply)
+
+Same recipe as F51 (head learns sign, cook accumulates magnitude)
+ported to two new domains:
+
+| domain | E1 | K range | cook K_max acc |
+| --- | --- | --- | --- |
+| number (F51 baseline) | 0.966 | 1..99 | **1.000** |
+| **colour cyclic 12** (F56) | 1.000 | 1..6 | 0.500 (K=6 half-ring ambiguity) |
+| **space cardinal 7×7** (F56) | 1.000 | 1..12 | 0.833 ± 0.144 |
+
+The colour K=6 result (0.500) is **structurally correct**: on
+a 12-hue ring, K=6 is the antipodal half-ring distance and
+both directions (+6 and −6) are equivalent modulo 12, so any
+deterministic predictor caps at 50% on this class.
+
+PCM v3 dual-process is therefore a **universal architectural
+pattern** for displacement-based OOD across PCM's domain
+substrate, not a number-specific trick. Phoneme V/M/P 3-axis
+successor is left as a future exercise — the 3-axis case
+introduces axis-selection choices at every cook iteration that
+warrant their own design analysis.
+
+## 10. Open follow-ups (after F54–F56)
+
+1. **Routing learned end-to-end** — replace
+   `calibrate_rpe_coverage`'s explicit threshold sweep with a
+   small classifier predicting whether RPE will succeed.
+   Connects to F45 / F46's "inductive bias must be imposed"
+   finding: does the model learn its own decision threshold
+   without explicit pressure?
+2. **Phoneme V/M/P 3-axis successor** — extend the cross-domain
+   successor pattern to `(voicing, manner, place)` triples,
+   handling axis-selection per cook step.
+3. **Sleep cache for non-number domains** — does
+   `distill_cook_to_rpe` extend cleanly to cyclic colour
+   distillation (where target classes wrap mod-N) and to spatial
+   distillation (where the RPE table is 2-D)?
+4. **Energy / RT measurement (E5 isolated)** — quantify cook
+   wall-clock per K vs RPE retrieval per K to validate the
+   cognitive RT-by-Δ scaling prediction explicitly.

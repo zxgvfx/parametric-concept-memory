@@ -24,8 +24,10 @@ import torch.nn.functional as F
 
 from pcm import ConceptGraph
 from pcm.dual_channel import (
+    ALiBiRelativePositionBias,
     ATTR_FACET_TEMPLATE,
     RelativePositionEmbedding,
+    SinusoidalRelativePositionEmbedding,
     SLOT_FACET_TEMPLATE,
     arithmetic_consistency_loss,
     collapse_dual_channel,
@@ -261,6 +263,43 @@ class TestDC4RPE(unittest.TestCase):
         self.assertGreater(
             rpe.table.weight.grad.abs().sum().item(), 0.0,
         )
+
+    def test_dc4g_sinusoidal_rpe_shape(self) -> None:
+        torch.manual_seed(0)
+        rpe = SinusoidalRelativePositionEmbedding(n_axes=2, embed_dim=16)
+        # n_displacements is -1 sentinel for continuous heads.
+        self.assertEqual(rpe.n_displacements, -1)
+        out = rpe(torch.tensor([0, 1, -1]), torch.tensor([2, 0, 3]))
+        self.assertEqual(out.shape, (3, 16))
+
+    def test_dc4h_sinusoidal_rpe_extrapolation(self) -> None:
+        """Sinusoidal basis is well-defined for any Δ regardless
+        of train range — output norm should not vanish for large
+        OOD displacements (the failure mode of finite lookup)."""
+        torch.manual_seed(0)
+        rpe = SinusoidalRelativePositionEmbedding(n_axes=1, embed_dim=8)
+        small = rpe(torch.tensor([1]))
+        large = rpe(torch.tensor([10000]))
+        # Both should be unit-magnitude-ish (sin²+cos²=1 per pair).
+        self.assertGreater(float(small.norm().item()), 0.5)
+        self.assertGreater(float(large.norm().item()), 0.5)
+
+    def test_dc4i_sinusoidal_invalid_dim(self) -> None:
+        with self.assertRaises(ValueError):
+            SinusoidalRelativePositionEmbedding(n_axes=2, embed_dim=2)
+        with self.assertRaises(ValueError):
+            SinusoidalRelativePositionEmbedding(n_axes=0, embed_dim=8)
+
+    def test_dc4j_alibi_bias_shape_and_sign(self) -> None:
+        torch.manual_seed(0)
+        bias = ALiBiRelativePositionBias(n_axes=1)
+        out = bias(torch.tensor([0, 1, -3, 5]))
+        self.assertEqual(out.shape, (4, 1))
+        # ALiBi bias is non-positive, monotonically decreasing in |Δ|.
+        flat = out.squeeze(-1)
+        self.assertEqual(float(flat[0].item()), 0.0)  # Δ=0 → 0 bias
+        self.assertLess(float(flat[2].item()), float(flat[1].item()))
+        self.assertLess(float(flat[3].item()), float(flat[2].item()))
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,7 @@ from pcm.dual_process import (
     DistillReport,
     IterativeDiffCook,
     SuccessorHead,
+    calibrate_rpe_coverage,
     distill_cook_to_rpe,
     route_diff,
 )
@@ -406,6 +407,70 @@ class TestDP4DistillCookToRPE(unittest.TestCase):
         )
         self.assertEqual(rep.n_steps, 10)
         self.assertLess(rep.final_loss, rep.initial_loss)
+
+
+# ---------------------------------------------------------------------------
+# DP5 — calibrate_rpe_coverage (F54 adaptive routing).
+# ---------------------------------------------------------------------------
+
+
+class TestDP5CalibrateRPECoverage(unittest.TestCase):
+    """F54 adaptive routing: calibrate_rpe_coverage finds the
+    largest K at which a synthetic RPE matches ground truth."""
+
+    def test_dp5a_perfect_rpe_full_range(self) -> None:
+        """A perfect RPE that always returns b - a should
+        calibrate to the maximum possible K (n_total - 1)."""
+        N = 50
+        rpe = lambda a, b: b - a
+        K = calibrate_rpe_coverage(
+            rpe, n_total=N, threshold=0.95, sample_size=20,
+        )
+        self.assertEqual(K, N - 1)
+
+    def test_dp5b_bounded_rpe_caps_at_train_max(self) -> None:
+        """An RPE that only works on |Δ| ≤ 10 (returns random
+        outside) calibrates to ~10."""
+        train_max = 10
+
+        def bounded_rpe(a: int, b: int) -> int:
+            d = b - a
+            if abs(d) <= train_max:
+                return d
+            return d + 1  # systematically wrong outside
+
+        K = calibrate_rpe_coverage(
+            bounded_rpe, n_total=30, threshold=0.95, sample_size=20,
+        )
+        self.assertLessEqual(K, train_max)
+        self.assertGreaterEqual(K, train_max - 1)
+
+    def test_dp5c_worthless_rpe_returns_zero(self) -> None:
+        """An RPE that always returns the wrong answer calibrates
+        to 0 (route every query elsewhere)."""
+        bad_rpe = lambda a, b: b - a + 1
+        K = calibrate_rpe_coverage(
+            bad_rpe, n_total=20, threshold=0.95, sample_size=10,
+        )
+        self.assertEqual(K, 0)
+
+    def test_dp5d_returns_largest_with_competence_islands(self) -> None:
+        """If RPE is correct on K ∈ [1..5] AND [10..15] but wrong
+        in between, the calibrator returns the LARGEST passing K
+        (15), not the first failure point (6)."""
+
+        def islanded_rpe(a: int, b: int) -> int:
+            d = b - a
+            ad = abs(d)
+            if ad <= 5 or 10 <= ad <= 15:
+                return d
+            return d + 1  # wrong on (5, 10) and >15
+
+        K = calibrate_rpe_coverage(
+            islanded_rpe, n_total=25, threshold=0.95, sample_size=20,
+        )
+        self.assertGreaterEqual(K, 14)  # at least near 15
+        self.assertLessEqual(K, 16)
 
 
 if __name__ == "__main__":
