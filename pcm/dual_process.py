@@ -47,6 +47,7 @@ __all__ = [
     "route_diff",
     "DistillReport",
     "distill_cook_to_rpe",
+    "calibrate_rpe_coverage",
 ]
 
 
@@ -518,3 +519,77 @@ def distill_cook_to_rpe(
         initial_loss=initial_loss,
         cook_oracle_acc=cook_oracle_acc,
     )
+
+
+# ---------------------------------------------------------------------------
+# calibrate_rpe_coverage — F54: adaptive routing companion to E4.
+# ---------------------------------------------------------------------------
+
+
+def calibrate_rpe_coverage(
+    rpe_predict: Callable[[int, int], int],
+    n_total: int,
+    *,
+    threshold: float = 0.95,
+    sample_size: int = 30,
+    rng_seed: int = 0,
+    max_K: int | None = None,
+) -> int:
+    """Sweep ``|Δ|`` from 1 to ``n_total - 1`` and return the largest
+    K at which ``rpe_predict(a, a + K)`` matches ``K`` on a sampled
+    subset at ≥ ``threshold`` rate.
+
+    The intended use is **adaptive routing** after F53's E4 sleep
+    cache: distillation expands the RPE's coverage but ``route_diff``
+    keeps using the original ``train_max_abs_delta`` until told
+    otherwise. After distillation, calling this function and feeding
+    its output back into ``route_diff`` as the new
+    ``train_max_abs_delta`` lets routing surface the RPE's broadened
+    capability and reduce cook usage.
+
+    Args:
+        rpe_predict: ``(a, b) → predicted_diff`` callable wrapping
+            the RPE head's argmax.
+        n_total: cardinality of the ordinal domain (cells, numbers,
+            phonemes, etc.).
+        threshold: minimum acceptable accuracy at a given K. 0.95
+            is the routing-soundness default; lower it to 0.5 if
+            you want to admit Ks where RPE is mostly-but-not-always
+            correct.
+        sample_size: pairs per K. Cheap to bump (default 30 ≪
+            n_total² in nearly all PCM domains).
+        rng_seed: deterministic sampling for reproducibility.
+        max_K: optional cap on the K range scanned. Defaults to
+            ``n_total - 1`` (full domain).
+
+    Returns the largest K satisfying ``acc ≥ threshold``; 0 if no
+    K passes (which is a meaningful signal — the RPE is no better
+    than chance, route every query to the cook).
+
+    Note: the function does NOT short-circuit on the first failing
+    K. The RPE may have multiple "competence islands" (e.g. correct
+    on |Δ| ≤ 19 in-range, then degraded near 20 from training-set
+    boundary effects, then accurate again on |Δ| ∈ [25, 80] post-
+    distillation). We always return the **maximum** passing K to
+    make the route_diff dispatch optimal.
+    """
+    import random
+    rng = random.Random(rng_seed)
+    if max_K is None:
+        max_K = n_total - 1
+    largest_pass = 0
+    for K in range(1, max_K + 1):
+        valid_starts = [a for a in range(n_total) if 0 <= a + K < n_total]
+        if not valid_starts:
+            continue
+        if len(valid_starts) > sample_size:
+            sample = rng.sample(valid_starts, sample_size)
+        else:
+            sample = valid_starts
+        hits = sum(
+            1 for a in sample
+            if rpe_predict(a, a + K) == K
+        )
+        if hits / len(sample) >= threshold:
+            largest_pass = K
+    return largest_pass

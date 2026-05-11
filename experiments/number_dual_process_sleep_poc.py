@@ -51,6 +51,7 @@ from pcm.dual_channel import (
 from pcm.dual_process import (
     IterativeDiffCook,
     SuccessorHead,
+    calibrate_rpe_coverage,
     distill_cook_to_rpe,
     route_diff,
 )
@@ -230,7 +231,15 @@ def _run_one(
     eval_Ks = [1, 5, 10, 20, 30, 50, 70, 99]
     eval_Ks = [k for k in eval_Ks if k <= n_total - 1]
 
-    def _eval_at_phase(label: str) -> dict:
+    def _eval_at_phase(
+        label: str, *, route_threshold: int | None = None,
+    ) -> dict:
+        """Evaluate RPE / cook accuracy per K, plus routing usage
+        with the supplied threshold (defaults to train_max). The
+        adaptive case overrides this with the calibrated value
+        after phase 2."""
+        if route_threshold is None:
+            route_threshold = train_max
         rpe_acc, cook_acc = {}, {}
         cook_route_count, rpe_route_count = 0, 0
         for K in eval_Ks:
@@ -245,11 +254,11 @@ def _run_one(
                 diff_c, _ = cook(a, b)
                 if diff_c == K:
                     cook_h += 1
-                # Routing usage on the same sample.
+                # Routing usage with the (possibly adaptive) threshold.
                 _, route = route_diff(
                     a, b,
                     rpe_predict=_rpe_predict, cook=cook,
-                    train_max_abs_delta=train_max,
+                    train_max_abs_delta=route_threshold,
                 )
                 if route == "cook":
                     cook_route_count += 1
@@ -260,6 +269,7 @@ def _run_one(
         n_total_route = cook_route_count + rpe_route_count
         return {
             "label": label,
+            "route_threshold": route_threshold,
             "rpe_acc_per_K": rpe_acc,
             "cook_acc_per_K": cook_acc,
             "rpe_OOD_K_max": rpe_acc[max(eval_Ks)],
@@ -340,14 +350,24 @@ def _run_one(
     )
     distill_wall = time.time() - distill_t0
 
-    # ─── Eval @ end of phase 2 ───
+    # ─── Eval @ end of phase 2 (with original threshold) ───
     phase2_eval = _eval_at_phase("phase2")
+
+    # ─── F54: adaptive routing — re-calibrate threshold post-distill ───
+    new_threshold = calibrate_rpe_coverage(
+        rpe_predict=_rpe_predict, n_total=n_total,
+        threshold=0.95, sample_size=30, rng_seed=seed,
+    )
+    phase2_adaptive = _eval_at_phase(
+        "phase2_adaptive", route_threshold=new_threshold,
+    )
 
     return {
         "seed": seed,
         "phase1_wall_s": phase1_wall,
         "phase1": phase1_eval,
         "phase2": phase2_eval,
+        "phase2_adaptive": phase2_adaptive,
         "distill": {
             "n_pairs": distill_report.n_pairs_distilled,
             "n_steps": distill_report.n_steps,
@@ -356,11 +376,16 @@ def _run_one(
             "cook_oracle_acc": distill_report.cook_oracle_acc,
             "wall_s": distill_wall,
         },
+        "calibrated_threshold": new_threshold,
         "rpe_OOD_uplift": phase2_eval["rpe_OOD_K_max"]
         - phase1_eval["rpe_OOD_K_max"],
-        "cook_route_fraction_drop": (
+        "cook_route_fraction_drop_static": (
             phase1_eval["cook_route_fraction"]
             - phase2_eval["cook_route_fraction"]
+        ),
+        "cook_route_fraction_drop_adaptive": (
+            phase1_eval["cook_route_fraction"]
+            - phase2_adaptive["cook_route_fraction"]
         ),
     }
 
@@ -404,14 +429,16 @@ def main() -> None:
             max_step=args.max_step,
         )
         rows.append(r)
-        p1 = r["phase1"]; p2 = r["phase2"]
+        p1 = r["phase1"]; p2 = r["phase2"]; p2a = r["phase2_adaptive"]
         print(
-            f"  [seed={seed}] phase1 RPE_K99={p1['rpe_OOD_K_max']:.3f}  "
-            f"phase2 RPE_K99={p2['rpe_OOD_K_max']:.3f}  "
-            f"distill_loss {r['distill']['initial_loss']:.2f}→"
+            f"  [seed={seed}] RPE_K99 p1→p2={p1['rpe_OOD_K_max']:.3f}→"
+            f"{p2['rpe_OOD_K_max']:.3f}  "
+            f"distill {r['distill']['initial_loss']:.2f}→"
             f"{r['distill']['final_loss']:.2f}  "
-            f"cook_route p1→p2: "
-            f"{p1['cook_route_fraction']:.2f}→{p2['cook_route_fraction']:.2f}"
+            f"cook_route p1→p2(static)={p1['cook_route_fraction']:.2f}→"
+            f"{p2['cook_route_fraction']:.2f}  "
+            f"adaptive_thr={r['calibrated_threshold']} → "
+            f"cook_route={p2a['cook_route_fraction']:.2f}"
         )
 
     def _stats(key: str, root: list[dict]) -> dict:
@@ -445,8 +472,17 @@ def main() -> None:
         "phase2_cook_route_fraction": _stats(
             "phase2.cook_route_fraction", rows,
         ),
+        "phase2_adaptive_cook_route_fraction": _stats(
+            "phase2_adaptive.cook_route_fraction", rows,
+        ),
+        "calibrated_threshold": _stats("calibrated_threshold", rows),
         "rpe_OOD_uplift": _stats("rpe_OOD_uplift", rows),
-        "cook_route_fraction_drop": _stats("cook_route_fraction_drop", rows),
+        "cook_route_fraction_drop_static": _stats(
+            "cook_route_fraction_drop_static", rows,
+        ),
+        "cook_route_fraction_drop_adaptive": _stats(
+            "cook_route_fraction_drop_adaptive", rows,
+        ),
         "distill_initial_loss": _stats("distill.initial_loss", rows),
         "distill_final_loss": _stats("distill.final_loss", rows),
     }
@@ -461,26 +497,44 @@ def main() -> None:
     p1m = summary["phase1_rpe_OOD_K_max"]
     p2m = summary["phase2_rpe_OOD_K_max"]
     uplift = summary["rpe_OOD_uplift"]
-    drop = summary["cook_route_fraction_drop"]
+    drop_s = summary["cook_route_fraction_drop_static"]
+    drop_a = summary["cook_route_fraction_drop_adaptive"]
     p1cm = summary["phase1_cook_route_fraction"]
     p2cm = summary["phase2_cook_route_fraction"]
-    print(f"  phase1 RPE K_max OOD acc:  {p1m.get('mean', float('nan')):+.3f}"
-          f"+-{p1m.get('std', float('nan')):.3f}")
-    print(f"  phase2 RPE K_max OOD acc:  {p2m.get('mean', float('nan')):+.3f}"
-          f"+-{p2m.get('std', float('nan')):.3f}")
-    print(f"  RPE OOD uplift (Δ):        {uplift.get('mean', float('nan')):+.3f}"
-          f"+-{uplift.get('std', float('nan')):.3f}")
-    print(f"  cook_route_fraction p1:    {p1cm.get('mean', float('nan')):+.3f}"
-          f"+-{p1cm.get('std', float('nan')):.3f}")
-    print(f"  cook_route_fraction p2:    {p2cm.get('mean', float('nan')):+.3f}"
-          f"+-{p2cm.get('std', float('nan')):.3f}")
-    print(f"  cook_route drop (Δ):       {drop.get('mean', float('nan')):+.3f}"
-          f"+-{drop.get('std', float('nan')):.3f}")
+    p2acm = summary["phase2_adaptive_cook_route_fraction"]
+    cthr = summary["calibrated_threshold"]
+    def _f(d, k):
+        return d.get(k, float("nan"))
+    print(f"  phase1 RPE K_max OOD acc:        {_f(p1m, 'mean'):+.3f}"
+          f"+-{_f(p1m, 'std'):.3f}")
+    print(f"  phase2 RPE K_max OOD acc:        {_f(p2m, 'mean'):+.3f}"
+          f"+-{_f(p2m, 'std'):.3f}")
+    print(f"  RPE OOD uplift (E4):             {_f(uplift, 'mean'):+.3f}"
+          f"+-{_f(uplift, 'std'):.3f}")
+    print(f"  cook_route_fraction p1:          {_f(p1cm, 'mean'):+.3f}"
+          f"+-{_f(p1cm, 'std'):.3f}")
+    print(f"  cook_route_fraction p2 (static): {_f(p2cm, 'mean'):+.3f}"
+          f"+-{_f(p2cm, 'std'):.3f}")
+    print(f"  cook_route drop static (Δ):      {_f(drop_s, 'mean'):+.3f}"
+          f"+-{_f(drop_s, 'std'):.3f}")
+    print(f"  calibrated threshold (F54):      "
+          f"{_f(cthr, 'mean'):.1f}+-{_f(cthr, 'std'):.1f}  "
+          f"(was static train_max={args.train_max})")
+    print(f"  cook_route_fraction p2 (adaptive): "
+          f"{_f(p2acm, 'mean'):+.3f}+-{_f(p2acm, 'std'):.3f}")
+    print(f"  cook_route drop adaptive (Δ):    {_f(drop_a, 'mean'):+.3f}"
+          f"+-{_f(drop_a, 'std'):.3f}")
 
     e4_pass = uplift.get("mean", 0.0) >= 0.30
+    f54_pass = drop_a.get("mean", 0.0) >= 0.30
     print(
-        f"\n  E4 verdict: "
+        f"\n  E4 verdict:  "
         f"{'[PASS]' if e4_pass else '[FAIL]'} (target uplift ≥ 0.30)"
+    )
+    print(
+        f"  F54 verdict: "
+        f"{'[PASS]' if f54_pass else '[FAIL]'} "
+        f"(target adaptive cook_route drop ≥ 0.30)"
     )
     print(f"\n  wrote {args.out / 'summary.json'}")
 
