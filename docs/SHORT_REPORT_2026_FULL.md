@@ -1,8 +1,9 @@
 # PCM 2026 Short Report — From v1 Baselines to Dual-Process Physics
 
-**Status**: project-level synthesis, May 2026. Covers F40 → F60,
+**Status**: project-level synthesis, May 2026. Covers F40 → F61,
 the full arc from "literature-driven causal experiments" to
-"physics-as-procedural-cook + cook applicability boundary".
+"physics-as-procedural-cook + statistical-attractor heads — the
+complete System-1/System-2 substrate".
 
 This report is the cohesive narrative version of:
 
@@ -14,8 +15,8 @@ This report is the cohesive narrative version of:
 
 reorganised as a single argument suitable for a workshop /
 short-paper venue. Numbers are reproducible from the cited
-output JSONs and commit hashes; the suite passes 157 / 157
-unit tests at F60.
+output JSONs and commit hashes; the suite passes 169 / 169
+unit tests at F61.
 
 ---
 
@@ -229,6 +230,16 @@ PCM v4 (F57–F59):
     ├─ StateLookupHead               (1-shot K-step lookup)
     └─ distill_physics_cook_to_lookup (F59 physics sleep cache)
   + scripts/neuromorphic_profile.py  (F58 hardware spec sheet)
+
+PCM v5 (F61):
+  + pcm/attractor.py
+    ├─ AttractorHead                 (escape + time + energy
+    │                                 + state mean/log-σ)
+    ├─ AttractorTargets              (training labels dataclass)
+    ├─ attractor_loss                (composite four-component)
+    ├─ HybridPhysicsDispatcher       (System-2 cook /
+    │                                 System-1 attractor router)
+    └─ HybridDecision                (per-call dispatcher trace)
 ```
 
 Public API surface: 20 new symbols, all in opt-in modules. v1
@@ -308,8 +319,8 @@ For chaotic regimes the right architectural lever is **not**
 deeper cooking but **statistical attractor models**: predict
 distributions over future states (escape probability, energy
 distribution after binary scattering, …), not pointwise
-trajectories. This is on the F60+ follow-up list as a
-distinct PCM v5 design problem.
+trajectories. F61 (next section) shipped that lever and closed
+the loop.
 
 Reproducibility: ``experiments/three_body_poc.py``;
 output JSONs in ``outputs/f60_stable_full2/`` and
@@ -317,17 +328,106 @@ output JSONs in ``outputs/f60_stable_full2/`` and
 
 ---
 
+## 3.6 F61 — PCM v5: statistical-attractor heads close the chaotic loop
+
+F60 left a concrete open problem: cook predicts trajectories,
+but in chaotic regimes trajectories are by definition
+unpredictable past ``K*``. The fix is the architectural mirror
+of cook — a head that predicts *outcome distributions* rather
+than *state trajectories*, in one shot, ``O(1)`` cost,
+``K``-invariant.
+
+PCM v5 (`pcm/attractor.py`) supplies that head plus the
+hybrid dispatcher that picks between cook and attractor based
+on the caller's target horizon:
+
+```
+K_target ≤ K*  →  PhysicsCook        (System 2, O(K))
+K_target >  K*  →  AttractorHead     (System 1, O(1))
+```
+
+Five outputs from one MLP trunk:
+
+| output | shape | what it predicts | loss |
+|---|---|---|---|
+| `escape_logits` | `(B, n_bodies)` | which body ejects first | cross-entropy |
+| `log_escape_time` | `(B,)` | log-time to ejection | MSE |
+| `energy_logits` | `(B, n_bodies)` | final kinetic-energy fraction | KL on simplex |
+| `mean_final_state` | `(B, state_dim)` | ensemble-mean long-horizon state | Gaussian NLL |
+| `log_std_final_state` | `(B, state_dim)` | calibrated uncertainty | Gaussian NLL |
+
+Validated on the same Pythagorean three-body system as F60,
+with `n_train=8000, n_test=1000, K_max=800, epochs=50`. Four
+falsifiable invariants:
+
+| invariant | F61 result | baseline | status |
+|---|---|---|---|
+| **A1** escape-body accuracy | **0.836** | 1/3 = 0.333 | PASS |
+| **A2** log(escape-time) R² | **+0.517** | 0.0 (constant predictor) | PASS |
+| **A4** energy-partition KL | **0.098** | 0.345 (uniform) | PASS |
+| **A3 state L2** at K=800 | hybrid **502** | cook 832, attractor 503 | hybrid ≥ best of two |
+| **A3 escape acc** at all K | hybrid 0.071 (K≤80) → 0.836 (K>80) | cook 0.071–0.825 | hybrid ≥ cook everywhere |
+
+The single most striking finding is **the dual structure
+itself**: cook's escape-classification accuracy is **0.071** at
+K=10–200, ``4× worse than chance`` (0.333) in the small-K
+regime where its state prediction is excellent (state L2 = 0.15
+at K=10). Cook is structurally a *trajectory* head; in the
+small-K regime where the system has barely started moving from
+all-rest, "which body is currently most distant" oscillates
+through different bodies as the orbital phase varies, with no
+relation to the eventual ejection body. The attractor's
+``argmax(escape_logits)`` reaches 0.836 at *every* K, because
+it is structurally predicting the eventual outcome from the
+very first state.
+
+In the other direction: attractor's ensemble-mean state
+prediction is ``L2 ≈ 11`` for any K, completely useless for
+short-K state-tracking (cook's state L2 at K=10 is 0.15 — 75×
+better). In short:
+
+> **Cook is necessary and sufficient for short-K state.
+> Attractor is necessary and sufficient for long-K outcome.
+> Neither is sufficient alone for both.**
+
+The hybrid dispatcher is the architectural object that knows
+this and routes accordingly. Together cook + attractor +
+dispatcher is the cleanest System-2 / System-1 / executive-
+function correspondence the project has produced — a complete
+substrate for "imagine the next two billiard collisions" *and*
+"this three-body collapse will eject the lightest body" inside
+the same parametric-concept-memory framework.
+
+Reproducibility: `experiments/three_body_attractor_poc.py`;
+output JSON in `outputs/f61_full/summary.json`. Walltime ~80 s
+on a single GPU.
+
+---
+
 ## 4. Open follow-ups
 
 These are the natural next steps. None blocks publication of
-F40 → F60 as a short report; all are concrete enough that any
+F40 → F61 as a short report; all are concrete enough that any
 of them could be the next milestone if pursued.
 
-1. **Statistical-attractor heads** (the F60-induced new
-   problem) — past the Lyapunov horizon K\*, replace pointwise
-   PhysicsCook with a head that predicts distributions over
-   future states / escape outcomes. PCM v5 design problem.
-2. **Force-controlled trajectories** — give cook a target end
+1. **Distributional outputs for non-physics domains.** Apply
+   v5 attractor heads to phoneme syllable-class outcomes and
+   colour holdout-percept categories. Tests whether the head
+   is genuinely domain-agnostic or contains a physics-specific
+   inductive bias.
+2. **Learned routing.** Replace the hard ``K*`` threshold in
+   `HybridPhysicsDispatcher` with a small classifier over
+   ``(state, K_target)`` predicting whether cook will outperform
+   attractor. Mirrors the F45/F46 finding that the model only
+   closes its own gate when explicit simplification pressure is
+   supplied.
+3. **N=4 / N=5 attractor.** The escape-body categorical
+   collapses at N=4 into "binary + binary" / "triple + single" /
+   "all dispersed" — a richer outcome decoder than 3-body.
+4. **Sleep distillation v5.** Distil from a slow ensemble
+   simulator into AttractorHead in the F59 style, so the head
+   improves without explicit category labels.
+5. **Force-controlled trajectories** — give cook a target end
    state, search over force sequences (PCM ↔ planning).
 3. **Phoneme V/M/P 3-axis successor** — the F56 cross-domain
    test domain we deferred; per-iteration axis selection is the
@@ -351,6 +451,7 @@ of them could be the next milestone if pursued.
 * `pcm/heads/v2_dual_channel.py` — public v2 heads
 * `pcm/dual_process.py` — v3 (F51 + F53 + F54)
 * `pcm/physics.py` — v4 (F57 + F59)
+* `pcm/attractor.py` — v5 (F61 attractor head + hybrid dispatcher)
 
 ### Experiments (each PoC reproducible from CLI)
 * `experiments/sleep_*` — S1/S2/S4/S5/S6 from F40
@@ -365,11 +466,13 @@ of them could be the next milestone if pursued.
 * `experiments/bouncing_ball_poc.py` — F57 P1/P2/P3
 * `experiments/bouncing_ball_sleep_distill.py` — F59 v4 cache
 * `experiments/three_body_poc.py` — F60 cook applicability boundary
+* `experiments/three_body_attractor_poc.py` — F61 attractor A1–A4
 
-### Tests (157 / 157 passing)
+### Tests (169 / 169 passing)
 * `tests/test_dual_channel.py` (24 cases — DC1–DC6)
 * `tests/test_dual_process.py` (25 cases — DP1–DP5)
 * `tests/test_physics.py` (21 cases — PH1–PH4)
+* `tests/test_attractor.py` (12 cases — AT1–AT4)
 * `tests/test_concept_graph_device.py` (3 cases — F42 regression)
 * `tests/test_tier_g_sleep.py` (10 cases — G1–G8)
 * `tests/test_diagnostics.py` (12 cases — pcm.diagnostics)
@@ -383,6 +486,7 @@ of them could be the next milestone if pursued.
 * `docs/PCM_V2_MIGRATION_GUIDE.md` — v1 → v2 recipe
 * `docs/PCM_V3_DUAL_PROCESS_DESIGN.md` — v3 design + §10 follow-ups
 * `docs/PCM_V4_PHYSICS_COOK_DESIGN.md` — v4 design
+* `docs/PCM_V5_ATTRACTOR_DESIGN.md` — v5 design + cognitive grounding
 * `docs/PCM_NEUROMORPHIC_PROFILE.md` — F58 hardware spec sheet
 * `docs/SHORT_REPORT_2026_S1_S6.md` — F40–F48 short report
 * `docs/SHORT_REPORT_2026_FULL.md` — this document
@@ -402,10 +506,13 @@ of them could be the next milestone if pursued.
 * `F59` v4 sleep cache lookup beats cook on K=50 by 1.8×
 * `F60` cook applicability boundary — figure-8 (λ\*=0.007)
   cleanly polynomial; Pythagorean (λ\*=0.091) ejects at K\*~11
+* `F61` PCM v5 attractor head — escape acc 0.836, log-time R²
+  +0.517, energy KL 0.098 vs uniform 0.345 on Pythagorean;
+  hybrid cook+attractor dispatcher closes the dual-process loop
 
 ---
 
 *Maintained as the canonical project-level summary. Update when
-each new milestone (F61+) ships. Numbers are reproducible from
+each new milestone (F62+) ships. Numbers are reproducible from
 the cited output JSONs; CLI commands are copy-pasteable from the
 docstrings of each experiment module.*
