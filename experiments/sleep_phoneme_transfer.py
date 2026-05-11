@@ -70,13 +70,19 @@ from experiments.phoneme_transfer_priors import (
 PHONEME_FEATS = [(p[1], p[2], p[3]) for p in PHONEMES]
 
 
-CONDITIONS = {
-    "A_baseline":    {"centroid": "random",      "sample": None,    "pair": False},
-    "B_articulator": {"centroid": "articulator", "sample": None,    "pair": False},
-    "C_zipfsource":  {"centroid": "random",      "sample": "zipf",  "pair": False},
-    "D_minpair":     {"centroid": "random",      "sample": None,    "pair": True},
-    "BCD_combined":  {"centroid": "articulator", "sample": "zipf",  "pair": True},
-}
+from pcm.diagnostics import (
+    AblationCondition, AblationLayers, run_causal_ablation,
+)
+
+
+CONDITIONS = (
+    AblationCondition("A_baseline", AblationLayers()),
+    AblationCondition("B_articulator", AblationLayers(B="articulator")),
+    AblationCondition("C_zipfsource", AblationLayers(C="zipf")),
+    AblationCondition("D_minpair", AblationLayers(D=True)),
+    AblationCondition("BCD_combined",
+                      AblationLayers(B="articulator", C="zipf", D=True)),
+)
 
 
 def _split_source_target(seed: int, n_target: int) -> tuple[list[int], list[int]]:
@@ -125,12 +131,14 @@ def _build_sample_weight(mode, src_idx) -> list[float] | None:
 
 
 def _run_one(
-    seed: int, cond_name: str, cond: dict, *,
+    seed: int, layers: AblationLayers, *,
     n_target: int, epochs: int, steps_per_epoch: int,
 ) -> dict:
     src_idx, tgt_idx = _split_source_target(seed, n_target)
-    centroid_init = _build_centroid_init(cond["centroid"], seed)
-    sample_w = _build_sample_weight(cond["sample"], src_idx)
+    centroid_init = _build_centroid_init(
+        layers.B if layers.B else "random", seed,
+    )
+    sample_w = _build_sample_weight(layers.C, src_idx)
 
     t0 = time.time()
     r = train_one(
@@ -139,15 +147,13 @@ def _run_one(
         source_indices=src_idx,
         sample_weight=sample_w,
         centroid_init=centroid_init,
-        enable_minimal_pair_head=bool(cond["pair"]),
+        enable_minimal_pair_head=bool(layers.is_active("D")),
     )
 
-    return {
-        "seed": seed,
-        "condition": cond_name,
-        "centroid_mode": cond["centroid"],
-        "sample_mode": cond["sample"],
-        "minimal_pair_head": cond["pair"],
+    out = {
+        "centroid_mode": layers.B,
+        "sample_mode": layers.C,
+        "minimal_pair_head": bool(layers.is_active("D")),
         "n_source": r["n_source"], "n_target": r["n_target"],
         "source_indices": src_idx, "target_indices": tgt_idx,
         "wall_s": time.time() - t0,
@@ -155,16 +161,15 @@ def _run_one(
         "accs_source": r["accs_source"],
         "accs_target": r["accs_target"],
     }
-
-
-def _stats(xs):
-    xs = [x for x in xs
-          if x is not None and not (isinstance(x, float) and math.isnan(x))]
-    if not xs:
-        return {"mean": float("nan"), "std": float("nan"), "n": 0}
-    m = sum(xs) / len(xs)
-    sd = math.sqrt(sum((x - m) ** 2 for x in xs) / max(len(xs) - 1, 1))
-    return {"mean": m, "std": sd, "min": min(xs), "max": max(xs), "n": len(xs)}
+    # Flatten per-axis source/target accuracies into top-level keys so
+    # they can be aggregated by run_causal_ablation as primary metrics.
+    for axis in ("v", "m", "p"):
+        out[f"source_{axis}"] = r["accs_source"].get(axis)
+        out[f"target_{axis}"] = r["accs_target"].get(axis)
+        sa = r["accs_source"].get(axis, 0) or 0
+        ta = r["accs_target"].get(axis, 0) or 0
+        out[f"delta_{axis}"] = ta - sa
+    return out
 
 
 def main() -> None:
@@ -176,8 +181,6 @@ def main() -> None:
                          f"(out of {N_PH}); rest become source")
     ap.add_argument("--epochs", type=int, default=EPOCHS)
     ap.add_argument("--steps-per-epoch", type=int, default=STEPS_PER_EPOCH)
-    ap.add_argument("--conditions", nargs="+",
-                    default=list(CONDITIONS.keys()))
     ap.add_argument("--out", type=Path,
                     default=Path("outputs/phoneme_transfer"))
     args = ap.parse_args()
@@ -187,58 +190,29 @@ def main() -> None:
     print(f"  PAPER §6.9 phoneme cross-language transfer: "
           f"N_PH={N_PH}, n_target={args.n_target}, "
           f"n_source={N_PH - args.n_target}, n_seeds={args.n_seeds}")
-    print(f"  device={DEVICE}; conditions={args.conditions}")
+    print(f"  device={DEVICE}; protocol=pcm.diagnostics.run_causal_ablation")
     print("=" * 80)
 
     chance = {"v": 1 / 2, "m": 1 / 4, "p": 1 / 4}
 
-    summary: dict = {
-        "config": vars(args) | {"out": str(args.out)},
-        "chance_levels": chance,
-        "by_condition": {},
-    }
-    for cond_name in args.conditions:
-        if cond_name not in CONDITIONS:
-            print(f"  ! unknown condition {cond_name!r}, skipping")
-            continue
-        cond = CONDITIONS[cond_name]
-        print(f"\n── {cond_name}: centroid={cond['centroid']}, "
-              f"sample={cond['sample']}, pair={cond['pair']} ──")
-        rows: list[dict] = []
-        for si in range(args.n_seeds):
-            seed = args.seed_base + si
-            r = _run_one(
-                seed, cond_name, cond,
-                n_target=args.n_target,
-                epochs=args.epochs, steps_per_epoch=args.steps_per_epoch,
-            )
-            rows.append(r)
-            sa, ta = r["accs_source"], r["accs_target"]
-            print(
-                f"  [seed={seed}] "
-                f"src V/M/P = {sa.get('v', 0):.3f}/{sa.get('m', 0):.3f}/{sa.get('p', 0):.3f}  "
-                f"tgt V/M/P = {ta.get('v', 0):.3f}/{ta.get('m', 0):.3f}/{ta.get('p', 0):.3f}  "
-                f"({r['wall_s']:.1f}s)"
-            )
-
-        cs = {"config": cond, "per_seed": rows}
-        for axis in ("v", "m", "p"):
-            cs[f"source_{axis}"] = _stats([r["accs_source"].get(axis) for r in rows])
-            cs[f"target_{axis}"] = _stats([r["accs_target"].get(axis) for r in rows])
-            cs[f"delta_{axis}"] = _stats([
-                r["accs_target"].get(axis, 0) - r["accs_source"].get(axis, 0)
-                for r in rows
-            ])
-        summary["by_condition"][cond_name] = cs
-        print(
-            f"  → src_V={cs['source_v']['mean']:.3f}±{cs['source_v']['std']:.3f}  "
-            f"tgt_V={cs['target_v']['mean']:.3f}±{cs['target_v']['std']:.3f}  "
-            f"src_M={cs['source_m']['mean']:.3f}  tgt_M={cs['target_m']['mean']:.3f}  "
-            f"src_P={cs['source_p']['mean']:.3f}  tgt_P={cs['target_p']['mean']:.3f}"
-        )
+    summary = run_causal_ablation(
+        _run_one,
+        n_seeds=args.n_seeds,
+        seed_base=args.seed_base,
+        conditions=CONDITIONS,
+        primary_metrics=(
+            "source_v", "source_m", "source_p",
+            "target_v", "target_m", "target_p",
+            "delta_v", "delta_m", "delta_p",
+        ),
+        n_target=args.n_target,
+        epochs=args.epochs, steps_per_epoch=args.steps_per_epoch,
+    )
+    summary["config"] |= vars(args) | {"out": str(args.out)}
+    summary["chance_levels"] = chance
 
     (args.out / "summary.json").write_text(
-        json.dumps(summary, indent=2, ensure_ascii=False)
+        json.dumps(summary, indent=2, ensure_ascii=False, default=str)
     )
 
     print("\n" + "═" * 80)
@@ -246,12 +220,10 @@ def main() -> None:
     print(f"  chance: V=0.500, M=0.250, P=0.250")
     print(f"  {'condition':<16s} "
           f"{'tgt_V':>14s} {'tgt_M':>14s} {'tgt_P':>14s}")
-    for cond_name in args.conditions:
-        if cond_name not in summary["by_condition"]:
-            continue
-        cs = summary["by_condition"][cond_name]
+    for cond in CONDITIONS:
+        cs = summary["by_condition"][cond.name]
         print(
-            f"  {cond_name:<16s} "
+            f"  {cond.name:<16s} "
             f"{cs['target_v']['mean']:>6.3f}±{cs['target_v']['std']:.3f}  "
             f"{cs['target_m']['mean']:>6.3f}±{cs['target_m']['std']:.3f}  "
             f"{cs['target_p']['mean']:>6.3f}±{cs['target_p']['std']:.3f}"

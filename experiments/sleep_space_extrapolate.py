@@ -139,13 +139,19 @@ def build_splits(
 # ────────────────────────────────────────────────────────────────────────
 
 
-CONDITIONS = {
-    "A_baseline":      {"centroid": "random",   "sample": None,           "row_head": False},
-    "B_cardinal":      {"centroid": "cardinal", "sample": None,           "row_head": False},
-    "C_centerbias":    {"centroid": "random",   "sample": "center_bias",  "row_head": False},
-    "D_rowindex":      {"centroid": "random",   "sample": None,           "row_head": True},
-    "BCD_combined":    {"centroid": "cardinal", "sample": "center_bias",  "row_head": True},
-}
+from pcm.diagnostics import (
+    AblationCondition, AblationLayers, run_causal_ablation,
+)
+
+
+CONDITIONS = (
+    AblationCondition("A_baseline", AblationLayers()),
+    AblationCondition("B_cardinal", AblationLayers(B="cardinal")),
+    AblationCondition("C_centerbias", AblationLayers(C="center_bias")),
+    AblationCondition("D_rowindex", AblationLayers(D=True)),
+    AblationCondition("BCD_combined",
+                      AblationLayers(B="cardinal", C="center_bias", D=True)),
+)
 
 
 def _build_centroids(mode: str, n_rows: int, n_cols: int, seed: int):
@@ -174,7 +180,7 @@ def _build_weights(mode, n_rows_train: int, n_cols_train: int):
 
 
 def _run_one(
-    seed: int, cond_name: str, cond: dict, *,
+    seed: int, layers: AblationLayers, *,
     n_rows_train: int, n_cols_train: int,
     n_rows_total: int, n_cols_total: int,
     epochs: int, steps_per_epoch: int, ood_ratio: float,
@@ -196,13 +202,14 @@ def _run_one(
                 scope="BASE",
                 provenance=f"space_extrap:r={r},c={c}",
             )
+    centroid_mode = layers.B if layers.B else "random"
     centroids = _build_centroids(
-        cond["centroid"], n_rows_total, n_cols_total, seed,
+        centroid_mode, n_rows_total, n_cols_total, seed,
     ).to(DEVICE)
 
     head_move = MoveHead(facet_dim=MOTION_DIM).to(DEVICE)
     row_head: RowIndexHead | None = None
-    if cond["row_head"]:
+    if layers.is_active("D"):
         row_head = RowIndexHead(
             n_rows=n_rows_total, facet_dim=MOTION_DIM,
         ).to(DEVICE)
@@ -216,7 +223,7 @@ def _run_one(
                     tick=0, device=DEVICE, init="normal_small",
                 )
         # Inject B-layer cardinal centroids into bundle pool (motion_bias).
-        if cond["centroid"] == "cardinal":
+        if centroid_mode == "cardinal":
             pool = cg.bundle_pool["motion_bias"]
             target_dim = pool.shape[-1]
             cents_trim = centroids[..., :target_dim]
@@ -229,7 +236,7 @@ def _run_one(
     cg.bundles_to(torch.device(DEVICE))
 
     # C-layer: per-cell sampling weights over the train pool.
-    weights_cells = _build_weights(cond["sample"], n_rows_train, n_cols_train)
+    weights_cells = _build_weights(layers.C, n_rows_train, n_cols_train)
     if weights_cells is not None:
         train_weights = []
         for t in splits["train"]:
@@ -312,10 +319,9 @@ def _run_one(
     test_outer = _eval(splits["test_outer_OOD"])
 
     return {
-        "seed": seed, "condition": cond_name,
-        "centroid_mode": cond["centroid"],
-        "sample_mode": cond["sample"],
-        "row_head": cond["row_head"],
+        "centroid_mode": layers.B,
+        "sample_mode": layers.C,
+        "row_head": bool(layers.is_active("D")),
         "wall_s": time.time() - t0,
         "train_acc": train_acc,
         "test_random_in_range": test_random,
@@ -333,16 +339,6 @@ def _run_one(
 # ────────────────────────────────────────────────────────────────────────
 
 
-def _stats(xs):
-    xs = [x for x in xs
-          if x is not None and not (isinstance(x, float) and math.isnan(x))]
-    if not xs:
-        return {"mean": float("nan"), "std": float("nan"), "n": 0}
-    m = sum(xs) / len(xs)
-    sd = math.sqrt(sum((x - m) ** 2 for x in xs) / max(len(xs) - 1, 1))
-    return {"mean": m, "std": sd, "min": min(xs), "max": max(xs), "n": len(xs)}
-
-
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--n-rows-train", type=int, default=5)
@@ -354,8 +350,6 @@ def main() -> None:
     ap.add_argument("--epochs", type=int, default=20)
     ap.add_argument("--steps-per-epoch", type=int, default=240)
     ap.add_argument("--ood-ratio", type=float, default=0.15)
-    ap.add_argument("--conditions", nargs="+",
-                    default=list(CONDITIONS.keys()))
     ap.add_argument("--out", type=Path,
                     default=Path("outputs/space_extrap"))
     args = ap.parse_args()
@@ -366,80 +360,44 @@ def main() -> None:
           f"train_grid={args.n_rows_train}x{args.n_cols_train}, "
           f"total_grid={args.n_rows_total}x{args.n_cols_total}, "
           f"n_seeds={args.n_seeds}")
-    print(f"  device={DEVICE}; conditions={args.conditions}")
+    print(f"  device={DEVICE}; protocol=pcm.diagnostics.run_causal_ablation")
     print("=" * 80)
 
-    summary: dict = {
-        "config": vars(args) | {"out": str(args.out)},
-        "by_condition": {},
-    }
-    for cond_name in args.conditions:
-        if cond_name not in CONDITIONS:
-            print(f"  ! unknown condition {cond_name!r}, skipping")
-            continue
-        cond = CONDITIONS[cond_name]
-        print(f"\n── {cond_name}: centroid={cond['centroid']}, "
-              f"sample={cond['sample']}, row_head={cond['row_head']} ──")
-        rows = []
-        for si in range(args.n_seeds):
-            seed = args.seed_base + si
-            r = _run_one(
-                seed, cond_name, cond,
-                n_rows_train=args.n_rows_train,
-                n_cols_train=args.n_cols_train,
-                n_rows_total=args.n_rows_total,
-                n_cols_total=args.n_cols_total,
-                epochs=args.epochs, steps_per_epoch=args.steps_per_epoch,
-                ood_ratio=args.ood_ratio,
-            )
-            rows.append(r)
-            print(
-                f"  [seed={seed}] "
-                f"train={r['train_acc']:.3f} "
-                f"in_range={r['test_random_in_range']:.3f}  "
-                f"mixed_OOD={r['test_mixed_OOD']:.3f}  "
-                f"outer_OOD={r['test_outer_OOD']:.3f}  "
-                f"({r['wall_s']:.1f}s)"
-            )
-
-        cs = {
-            "config": cond,
-            "per_seed": rows,
-            "train_acc": _stats([r["train_acc"] for r in rows]),
-            "test_random_in_range":
-                _stats([r["test_random_in_range"] for r in rows]),
-            "test_mixed_OOD":
-                _stats([r["test_mixed_OOD"] for r in rows]),
-            "test_outer_OOD":
-                _stats([r["test_outer_OOD"] for r in rows]),
-        }
-        summary["by_condition"][cond_name] = cs
-        rir = cs["test_random_in_range"]
-        mix = cs["test_mixed_OOD"]
-        out = cs["test_outer_OOD"]
-        print(
-            f"  → in_range = {rir['mean']:.3f}±{rir['std']:.3f}  "
-            f"mixed = {mix['mean']:.3f}±{mix['std']:.3f}  "
-            f"outer = {out['mean']:.3f}±{out['std']:.3f}"
-        )
+    summary = run_causal_ablation(
+        _run_one,
+        n_seeds=args.n_seeds,
+        seed_base=args.seed_base,
+        conditions=CONDITIONS,
+        primary_metrics=(
+            "train_acc",
+            "test_random_in_range",
+            "test_mixed_OOD",
+            "test_outer_OOD",
+        ),
+        n_rows_train=args.n_rows_train,
+        n_cols_train=args.n_cols_train,
+        n_rows_total=args.n_rows_total,
+        n_cols_total=args.n_cols_total,
+        epochs=args.epochs, steps_per_epoch=args.steps_per_epoch,
+        ood_ratio=args.ood_ratio,
+    )
+    summary["config"] |= vars(args) | {"out": str(args.out)}
 
     (args.out / "summary.json").write_text(
-        json.dumps(summary, indent=2, ensure_ascii=False)
+        json.dumps(summary, indent=2, ensure_ascii=False, default=str)
     )
 
     print("\n" + "═" * 80)
     print("  cross-condition summary (chance ≈ 1/5 = 0.200):")
     print(f"  {'condition':<16s} {'in_range':>16s} {'mixed_OOD':>16s} "
           f"{'outer_OOD':>16s}")
-    for cond_name in args.conditions:
-        if cond_name not in summary["by_condition"]:
-            continue
-        cs = summary["by_condition"][cond_name]
+    for cond in CONDITIONS:
+        cs = summary["by_condition"][cond.name]
         ir = cs["test_random_in_range"]
         mx = cs["test_mixed_OOD"]
         ot = cs["test_outer_OOD"]
         print(
-            f"  {cond_name:<16s} "
+            f"  {cond.name:<16s} "
             f"{ir['mean']:>8.3f}±{ir['std']:.3f}   "
             f"{mx['mean']:>8.3f}±{mx['std']:.3f}   "
             f"{ot['mean']:>8.3f}±{ot['std']:.3f}"

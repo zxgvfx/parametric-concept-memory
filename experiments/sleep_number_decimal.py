@@ -146,13 +146,20 @@ def _last_digit_cluster_purity(
 # ────────────────────────────────────────────────────────────────────────
 
 
-CONDITIONS = {
-    "A_baseline":      {"centroid": "random",         "sample": None,           "ld":  False},
-    "B_decimal":       {"centroid": "decimal_cones",  "sample": None,           "ld":  False},
-    "C_roundbias":     {"centroid": "random",         "sample": "round_number", "ld":  False},
-    "D_lastdigit":     {"centroid": "random",         "sample": None,           "ld":  True},
-    "BCD_combined":    {"centroid": "decimal_cones",  "sample": "round_number", "ld":  True},
-}
+from pcm.diagnostics import (
+    AblationCondition, AblationLayers, run_causal_ablation,
+)
+
+
+CONDITIONS = (
+    AblationCondition("A_baseline", AblationLayers()),
+    AblationCondition("B_decimal", AblationLayers(B="decimal_cones")),
+    AblationCondition("C_roundbias", AblationLayers(C="round_number")),
+    AblationCondition("D_lastdigit", AblationLayers(D=True)),
+    AblationCondition("BCD_combined",
+                      AblationLayers(B="decimal_cones",
+                                     C="round_number", D=True)),
+)
 
 
 def _split_triples(N: int, step: float, ood_ratio: float, seed: int):
@@ -180,22 +187,22 @@ def _build_weights(mode: str | None, N: int) -> list[float] | None:
 
 
 def _run_one_seed(
-    seed: int, cond_name: str, cond: dict, *,
+    seed: int, layers: AblationLayers, *,
     N: int, epochs: int, steps_per_epoch: int,
     ood_ratio: float,
     sleep_warmup: int, sleep_every: int, sleep_k: int,
 ) -> dict:
     train_triples, test_triples = _split_triples(N, 1.0, ood_ratio, seed)
-    weights = _build_weights(cond["sample"], N)
+    weights = _build_weights(layers.C, N)
 
     t0 = time.time()
     r = train_quad(
         N, 1.0, seed,
         train_triples=train_triples,
         epochs=epochs, steps_per_epoch=steps_per_epoch,
-        centroid_mode=cond["centroid"],
+        centroid_mode=layers.B if layers.B else "random",
         digit_sample_weight=weights,
-        enable_last_digit_head=bool(cond["ld"]),
+        enable_last_digit_head=bool(layers.is_active("D")),
         sleep_every=sleep_every, sleep_warmup=sleep_warmup,
         sleep_k_clusters=sleep_k,
         sleep_assignment="hard",
@@ -228,11 +235,9 @@ def _run_one_seed(
     purity = _last_digit_cluster_purity(r["bundle_by_idx"], proto_rows)
 
     return {
-        "seed": seed,
-        "condition": cond_name,
-        "centroid_mode": cond["centroid"],
-        "sample_mode": cond["sample"],
-        "last_digit_head": cond["ld"],
+        "centroid_mode": layers.B,
+        "sample_mode": layers.C,
+        "last_digit_head": bool(layers.is_active("D")),
         "wall_s": time.time() - t0,
         "train_acc_overall": sum(train_acc.values()) / max(len(train_acc), 1),
         "ood_acc_overall": sum(ood_acc.values()) / max(len(ood_acc), 1),
@@ -242,19 +247,10 @@ def _run_one_seed(
         "spike_5": spike5,
         "avg_cos_offset1": avg_cos1,
         "avg_cos_offset10": avg_cos10,
-        "units_gap_cos10_minus_cos1": units_gap,
+        "units_gap": units_gap,
         "last_digit_purity": purity["purity"],
         "purity_n_clusters": purity["n_clusters"],
     }
-
-
-def _stats(xs):
-    xs = [x for x in xs if x is not None and not (isinstance(x, float) and math.isnan(x))]
-    if not xs:
-        return {"mean": float("nan"), "std": float("nan"), "n": 0}
-    m = sum(xs) / len(xs)
-    sd = math.sqrt(sum((x - m) ** 2 for x in xs) / max(len(xs) - 1, 1))
-    return {"mean": m, "std": sd, "min": min(xs), "max": max(xs), "n": len(xs)}
 
 
 def main() -> None:
@@ -270,8 +266,6 @@ def main() -> None:
     ap.add_argument("--sleep-k", type=int, default=10,
                     help="cluster count for the sleep diagnostic; 10 lets us "
                          "test if anchors align with last-digit equivalence")
-    ap.add_argument("--conditions", nargs="+",
-                    default=list(CONDITIONS.keys()))
     ap.add_argument("--out", type=Path,
                     default=Path("outputs/decimal_primaries"))
     args = ap.parse_args()
@@ -283,64 +277,34 @@ def main() -> None:
           f"steps={args.steps_per_epoch}")
     print(f"  sleep k={args.sleep_k}, warmup={args.sleep_warmup}, "
           f"every={args.sleep_every}, ood={args.ood_ratio}")
-    print(f"  device={DEVICE}; conditions={args.conditions}")
+    print(f"  device={DEVICE}; protocol=pcm.diagnostics.run_causal_ablation")
     print("=" * 76)
 
-    summary: dict = {
-        "config": vars(args) | {"out": str(args.out)},
-        "by_condition": {},
-    }
-    for cond_name in args.conditions:
-        if cond_name not in CONDITIONS:
-            print(f"  ! unknown condition {cond_name!r}, skipping")
-            continue
-        cond = CONDITIONS[cond_name]
-        print(f"\n── {cond_name}: centroid={cond['centroid']}, "
-              f"sample={cond['sample']}, last-digit-head={cond['ld']} ──")
-        rows: list[dict] = []
-        for si in range(args.n_seeds):
-            seed = args.seed_base + si
-            r = _run_one_seed(
-                seed, cond_name, cond,
-                N=args.N, epochs=args.epochs, steps_per_epoch=args.steps_per_epoch,
-                ood_ratio=args.ood_ratio,
-                sleep_warmup=args.sleep_warmup, sleep_every=args.sleep_every,
-                sleep_k=args.sleep_k,
-            )
-            rows.append(r)
-            print(
-                f"  [seed={seed}] "
-                f"acc={r['train_acc_overall']:.3f} "
-                f"OOD={r['ood_acc_overall']:.3f}  "
-                f"spike10={r['spike_10']:+.4f} spike5={r['spike_5']:+.4f}  "
-                f"cos[+1]={r['avg_cos_offset1']:+.3f} "
-                f"cos[+10]={r['avg_cos_offset10']:+.3f}  "
-                f"purity={r['last_digit_purity']:.3f}  "
-                f"({r['wall_s']:.1f}s)"
-            )
+    summary = run_causal_ablation(
+        _run_one_seed,
+        n_seeds=args.n_seeds,
+        seed_base=args.seed_base,
+        conditions=CONDITIONS,
+        primary_metrics=(
+            "train_acc_overall", "ood_acc_overall", "rho_log",
+            "spike_10", "spike_5", "units_gap", "last_digit_purity",
+        ),
+        N=args.N, epochs=args.epochs, steps_per_epoch=args.steps_per_epoch,
+        ood_ratio=args.ood_ratio,
+        sleep_warmup=args.sleep_warmup, sleep_every=args.sleep_every,
+        sleep_k=args.sleep_k,
+    )
+    summary["config"] |= vars(args) | {"out": str(args.out)}
 
-        cs = {
-            "config": cond,
-            "per_seed": rows,
-            "train_acc": _stats([r["train_acc_overall"] for r in rows]),
-            "ood_acc": _stats([r["ood_acc_overall"] for r in rows]),
-            "rho_log": _stats([r["rho_log"] for r in rows]),
-            "spike_10": _stats([r["spike_10"] for r in rows]),
-            "spike_5": _stats([r["spike_5"] for r in rows]),
-            "units_gap": _stats([r["units_gap_cos10_minus_cos1"] for r in rows]),
-            "last_digit_purity": _stats([r["last_digit_purity"] for r in rows]),
-        }
-        summary["by_condition"][cond_name] = cs
-        print(
-            f"  → spike10={cs['spike_10']['mean']:+.4f}±{cs['spike_10']['std']:.4f} "
-            f"spike5={cs['spike_5']['mean']:+.4f}±{cs['spike_5']['std']:.4f}  "
-            f"units_gap={cs['units_gap']['mean']:+.3f}±{cs['units_gap']['std']:.3f}  "
-            f"purity={cs['last_digit_purity']['mean']:.3f}±"
-            f"{cs['last_digit_purity']['std']:.3f}"
-        )
+    # Backward-compat aliases for existing F12 figure / paper sections.
+    for cond_name, cs in summary["by_condition"].items():
+        if "train_acc_overall" in cs and "train_acc" not in cs:
+            cs["train_acc"] = cs["train_acc_overall"]
+        if "ood_acc_overall" in cs and "ood_acc" not in cs:
+            cs["ood_acc"] = cs["ood_acc_overall"]
 
     (args.out / "summary.json").write_text(
-        json.dumps(summary, indent=2, ensure_ascii=False)
+        json.dumps(summary, indent=2, ensure_ascii=False, default=str)
     )
 
     # Cross-condition table
@@ -348,17 +312,15 @@ def main() -> None:
     print("  cross-condition summary:")
     print(f"  {'condition':<16s} {'spike10':>10s} {'spike5':>10s} "
           f"{'units_gap':>10s} {'purity':>8s} {'OOD':>7s}")
-    for cond_name in args.conditions:
-        if cond_name not in summary["by_condition"]:
-            continue
-        cs = summary["by_condition"][cond_name]
+    for cond in CONDITIONS:
+        cs = summary["by_condition"][cond.name]
         print(
-            f"  {cond_name:<16s} "
+            f"  {cond.name:<16s} "
             f"{cs['spike_10']['mean']:>+8.4f}±{cs['spike_10']['std']:.3f} "
             f"{cs['spike_5']['mean']:>+8.4f}±{cs['spike_5']['std']:.3f} "
             f"{cs['units_gap']['mean']:>+8.3f}±{cs['units_gap']['std']:.3f} "
             f"{cs['last_digit_purity']['mean']:>5.3f}±{cs['last_digit_purity']['std']:.3f} "
-            f"{cs['ood_acc']['mean']:>5.3f}±{cs['ood_acc']['std']:.3f}"
+            f"{cs['ood_acc_overall']['mean']:>5.3f}±{cs['ood_acc_overall']['std']:.3f}"
         )
     print(f"\n  wrote {args.out / 'summary.json'}")
 

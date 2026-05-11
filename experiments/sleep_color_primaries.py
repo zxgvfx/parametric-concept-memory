@@ -94,13 +94,19 @@ def _red_peak_weights() -> list[float]:
     return out
 
 
-CONDITIONS = {
-    "A_baseline":    {"centroid": "random",  "sample": None,         "ripe": False},
-    "B_lms":         {"centroid": "lms",     "sample": None,         "ripe": False},
-    "C_greenpeak":   {"centroid": "random",  "sample": "green_peak", "ripe": False},
-    "D_ripehead":    {"centroid": "random",  "sample": None,         "ripe": True},
-    "BCD_combined":  {"centroid": "lms",     "sample": "green_peak", "ripe": True},
-}
+from pcm.diagnostics import (
+    AblationCondition, AblationLayers, run_causal_ablation,
+)
+
+
+CONDITIONS = (
+    AblationCondition("A_baseline", AblationLayers()),
+    AblationCondition("B_lms", AblationLayers(B="lms")),
+    AblationCondition("C_greenpeak", AblationLayers(C="green_peak")),
+    AblationCondition("D_ripehead", AblationLayers(D=True)),
+    AblationCondition("BCD_combined",
+                      AblationLayers(B="lms", C="green_peak", D=True)),
+)
 
 
 def _build_centroids(mode: str, seed: int) -> torch.Tensor:
@@ -126,17 +132,17 @@ def _build_weights(mode: str | None) -> list[float] | None:
 # ────────────────────────────────────────────────────────────────────────
 
 
-def _run_one_seed(seed: int, cond_name: str, cond: dict, *,
+def _run_one_seed(seed: int, layers: AblationLayers, *,
                   k: int, epochs: int, steps: int,
                   sleep_warmup: int, sleep_every: int) -> dict:
-    centroids = _build_centroids(cond["centroid"], seed)
-    weights = _build_weights(cond["sample"])
+    centroids = _build_centroids(layers.B if layers.B else "random", seed)
+    weights = _build_weights(layers.C)
     t0 = time.time()
     r = train_one(
         "single", seed, centroids,
         epochs=epochs, steps_per_epoch=steps,
         mix_sample_weight=weights,
-        enable_ripe_head=bool(cond["ripe"]),
+        enable_ripe_head=bool(layers.is_active("D")),
         sleep_every=sleep_every, sleep_warmup=sleep_warmup,
         sleep_k_clusters=k,
         sleep_assignment="hard",
@@ -175,11 +181,9 @@ def _run_one_seed(seed: int, cond_name: str, cond: dict, *,
     priors = _prior_match(nearest)
 
     return {
-        "seed": seed,
-        "condition": cond_name,
-        "centroid_mode": cond["centroid"],
-        "sample_mode": cond["sample"],
-        "ripe_head": cond["ripe"],
+        "centroid_mode": layers.B,
+        "sample_mode": layers.C,
+        "ripe_head": bool(layers.is_active("D")),
         "anchor_nearest_hues": nearest,
         "spacings": eq["spacings"],
         "is_equidistant": eq["is_equidistant"],
@@ -202,8 +206,6 @@ def main() -> None:
     ap.add_argument("--steps-per-epoch", type=int, default=STEPS_PER_EPOCH)
     ap.add_argument("--sleep-warmup", type=int, default=15)
     ap.add_argument("--sleep-every", type=int, default=5)
-    ap.add_argument("--conditions", nargs="+",
-                    default=list(CONDITIONS.keys()))
     ap.add_argument("--out", type=Path,
                     default=Path("outputs/color_primaries"))
     args = ap.parse_args()
@@ -212,67 +214,45 @@ def main() -> None:
     print("=" * 72)
     print(f"  PAPER §6.8 color primaries ablation: n_seeds={args.n_seeds}, "
           f"k={args.k}, epochs={args.epochs}, steps={args.steps_per_epoch}")
-    print(f"  device={DEVICE}; conditions={args.conditions}")
+    print(f"  device={DEVICE}; protocol=pcm.diagnostics.run_causal_ablation")
     print("=" * 72)
 
-    summary: dict = {
-        "config": vars(args) | {"out": str(args.out)},
-        "by_condition": {},
-    }
-    for cond_name in args.conditions:
-        if cond_name not in CONDITIONS:
-            print(f"  ! unknown condition {cond_name!r}, skipping")
-            continue
-        cond = CONDITIONS[cond_name]
-        print(f"\n── {cond_name}: centroid={cond['centroid']}, "
-              f"sample={cond['sample']}, ripe={cond['ripe']} ──")
-        rows: list[dict] = []
-        for si in range(args.n_seeds):
-            seed = args.seed_base + si
-            r = _run_one_seed(
-                seed, cond_name, cond,
-                k=args.k, epochs=args.epochs, steps=args.steps_per_epoch,
-                sleep_warmup=args.sleep_warmup, sleep_every=args.sleep_every,
-            )
-            rows.append(r)
-            eq_str = "EQUI" if r["is_equidistant"] else f"dev={r['max_dev']}"
-            priors_hit = ",".join(
-                name for name, m in r["perceptual_prior_match"].items() if m
-            ) or "(none)"
-            print(
-                f"  [seed={seed}] hues={r['anchor_nearest_hues']}  "
-                f"spacings={r['spacings']}  {eq_str}  "
-                f"sizes={r['cluster_sizes']}  prior={priors_hit}  "
-                f"({r['wall_s']:.1f}s)"
-            )
+    summary = run_causal_ablation(
+        _run_one_seed,
+        n_seeds=args.n_seeds,
+        seed_base=args.seed_base,
+        conditions=CONDITIONS,
+        primary_metrics=("max_dev", "wall_s"),  # numeric-only metrics for stats
+        k=args.k, epochs=args.epochs, steps=args.steps_per_epoch,
+        sleep_warmup=args.sleep_warmup, sleep_every=args.sleep_every,
+    )
+    summary["config"] |= vars(args) | {"out": str(args.out)}
 
-        n_equi = sum(1 for r in rows if r["is_equidistant"])
+    # Augment cond summaries with §6.7 / §6.8 ad-hoc cond-level fields
+    # (counts and rates that are not per-seed numeric stats).
+    for cond in CONDITIONS:
+        cs = summary["by_condition"][cond.name]
+        rows = cs["per_seed"]
+        n_equi = sum(1 for r in rows if r.get("is_equidistant"))
         rot_counter: Counter[int] = Counter()
-        for r in rows:
-            if r["rotation_class"] is not None:
-                rot_counter[r["rotation_class"]] += 1
         prior_counter: Counter[str] = Counter()
         for r in rows:
-            for name, m in r["perceptual_prior_match"].items():
+            if r.get("rotation_class") is not None:
+                rot_counter[r["rotation_class"]] += 1
+            for name, m in (r.get("perceptual_prior_match") or {}).items():
                 if m:
                     prior_counter[name] += 1
         red_anchor_rate = sum(
             1 for r in rows
-            if any(h in {0, 1, 11} for h in r["anchor_nearest_hues"])
+            if any(h in {0, 1, 11} for h in (r.get("anchor_nearest_hues") or []))
         ) / max(args.n_seeds, 1)
-
-        cond_summary = {
-            "config": cond,
-            "per_seed": rows,
-            "n_equidistant": n_equi,
-            "fraction_equidistant": n_equi / max(args.n_seeds, 1),
-            "rotation_class_histogram": dict(rot_counter),
-            "perceptual_prior_match_counts": dict(prior_counter),
-            "fraction_anchor_in_red_wedge": red_anchor_rate,
-        }
-        summary["by_condition"][cond_name] = cond_summary
+        cs["n_equidistant"] = n_equi
+        cs["fraction_equidistant"] = n_equi / max(args.n_seeds, 1)
+        cs["rotation_class_histogram"] = dict(rot_counter)
+        cs["perceptual_prior_match_counts"] = dict(prior_counter)
+        cs["fraction_anchor_in_red_wedge"] = red_anchor_rate
         print(
-            f"  → equidistant: {n_equi}/{args.n_seeds}, "
+            f"  [{cond.name}] equidistant: {n_equi}/{args.n_seeds}, "
             f"rotation hist: {dict(rot_counter)}, "
             f"red-wedge anchor: {red_anchor_rate:.2f}"
         )
@@ -282,7 +262,7 @@ def main() -> None:
                 print(f"     {name}: {cnt}/{args.n_seeds} match")
 
     (args.out / "summary.json").write_text(
-        json.dumps(summary, indent=2, ensure_ascii=False)
+        json.dumps(summary, indent=2, ensure_ascii=False, default=str)
     )
 
     # Cross-condition summary table
@@ -290,13 +270,11 @@ def main() -> None:
     print("  cross-condition summary (RGB hits, red-wedge fraction):")
     print(f"  {'condition':<16s} {'equi':>5s} {'RGB':>5s} {'CMY':>5s} "
           f"{'RYB':>5s} {'CMYK':>5s} {'WC6':>5s} {'red_wedge':>10s}")
-    for cond_name in args.conditions:
-        if cond_name not in summary["by_condition"]:
-            continue
-        cs = summary["by_condition"][cond_name]
+    for cond in CONDITIONS:
+        cs = summary["by_condition"][cond.name]
         priors = cs["perceptual_prior_match_counts"]
         print(
-            f"  {cond_name:<16s} {cs['n_equidistant']:>3d}/{args.n_seeds:<2d} "
+            f"  {cond.name:<16s} {cs['n_equidistant']:>3d}/{args.n_seeds:<2d} "
             f"{priors.get('RGB', 0):>3d}/{args.n_seeds:<2d} "
             f"{priors.get('CMY', 0):>3d}/{args.n_seeds:<2d} "
             f"{priors.get('RYB', 0):>3d}/{args.n_seeds:<2d} "

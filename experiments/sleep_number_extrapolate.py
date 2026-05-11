@@ -47,13 +47,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import random
 import time
 from pathlib import Path
 
-import torch
-
+from pcm.diagnostics import (
+    AblationCondition, AblationLayers, run_causal_ablation,
+)
 from experiments.quad_study import (
     DEVICE,
     OPS,
@@ -65,17 +65,19 @@ from experiments.number_decimal_priors import round_number_weights
 
 
 # ────────────────────────────────────────────────────────────────────────
-# Conditions (mirror §7.4)
+# Conditions (mirror §7.4) — declared via pcm.diagnostics primitives
 # ────────────────────────────────────────────────────────────────────────
 
 
-CONDITIONS = {
-    "A_baseline":   {"centroid": "random",        "sample": None,           "ld": False},
-    "B_decimal":    {"centroid": "decimal_cones", "sample": None,           "ld": False},
-    "C_roundbias":  {"centroid": "random",        "sample": "round_number", "ld": False},
-    "D_lastdigit":  {"centroid": "random",        "sample": None,           "ld": True},
-    "BCD_combined": {"centroid": "decimal_cones", "sample": "round_number", "ld": True},
-}
+CONDITIONS = (
+    AblationCondition("A_baseline", AblationLayers()),
+    AblationCondition("B_decimal", AblationLayers(B="decimal_cones")),
+    AblationCondition("C_roundbias", AblationLayers(C="round_number")),
+    AblationCondition("D_lastdigit", AblationLayers(D=True)),
+    AblationCondition("BCD_combined",
+                      AblationLayers(B="decimal_cones",
+                                     C="round_number", D=True)),
+)
 
 
 # ────────────────────────────────────────────────────────────────────────
@@ -133,14 +135,14 @@ def _build_splits(
 
 
 def _run_one(
-    seed: int, cond_name: str, cond: dict, *,
+    seed: int, layers: AblationLayers, *,
     N_train: int, N_total: int,
     epochs: int, steps_per_epoch: int,
     ood_ratio: float,
 ) -> dict:
     splits = _build_splits(N_train, N_total, ood_ratio, seed)
     weights = (round_number_weights(N_train, boost=5.0)
-               if cond["sample"] == "round_number" else None)
+               if layers.C == "round_number" else None)
 
     t0 = time.time()
     r = train_quad(
@@ -148,18 +150,17 @@ def _run_one(
         train_triples=splits["train"],
         epochs=epochs, steps_per_epoch=steps_per_epoch,
         n_total=N_total,
-        centroid_mode=cond["centroid"],
+        centroid_mode=layers.B if layers.B else "random",
         digit_sample_weight=weights,
-        enable_last_digit_head=bool(cond["ld"]),
+        enable_last_digit_head=bool(layers.is_active("D")),
         sleep_every=None,
         use_abstract=False,
     )
 
     out = {
-        "seed": seed, "condition": cond_name,
-        "centroid_mode": cond["centroid"],
-        "sample_mode": cond["sample"],
-        "last_digit_head": cond["ld"],
+        "centroid_mode": layers.B,
+        "sample_mode": layers.C,
+        "last_digit_head": bool(layers.is_active("D")),
         "wall_s": time.time() - t0,
     }
 
@@ -183,16 +184,6 @@ def _run_one(
     return out
 
 
-def _stats(xs):
-    xs = [x for x in xs
-          if x is not None and not (isinstance(x, float) and math.isnan(x))]
-    if not xs:
-        return {"mean": float("nan"), "std": float("nan"), "n": 0}
-    m = sum(xs) / len(xs)
-    sd = math.sqrt(sum((x - m) ** 2 for x in xs) / max(len(xs) - 1, 1))
-    return {"mean": m, "std": sd, "min": min(xs), "max": max(xs), "n": len(xs)}
-
-
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--N-train", type=int, default=30)
@@ -202,8 +193,6 @@ def main() -> None:
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--steps-per-epoch", type=int, default=240)
     ap.add_argument("--ood-ratio", type=float, default=0.15)
-    ap.add_argument("--conditions", nargs="+",
-                    default=list(CONDITIONS.keys()))
     ap.add_argument("--out", type=Path,
                     default=Path("outputs/extrapolate"))
     args = ap.parse_args()
@@ -212,77 +201,48 @@ def main() -> None:
     print("=" * 80)
     print(f"  PAPER §7.5 length extrapolation: N_train={args.N_train}, "
           f"N_total={args.N_total}, n_seeds={args.n_seeds}")
-    print(f"  device={DEVICE}; conditions={args.conditions}")
+    print(f"  device={DEVICE}; protocol=pcm.diagnostics.run_causal_ablation")
     print("=" * 80)
 
-    summary: dict = {
-        "config": vars(args) | {"out": str(args.out)},
-        "by_condition": {},
-    }
-    for cond_name in args.conditions:
-        if cond_name not in CONDITIONS:
-            print(f"  ! unknown condition {cond_name!r}, skipping")
-            continue
-        cond = CONDITIONS[cond_name]
-        print(f"\n── {cond_name}: centroid={cond['centroid']}, "
-              f"sample={cond['sample']}, last-digit-head={cond['ld']} ──")
-        rows: list[dict] = []
-        for si in range(args.n_seeds):
-            seed = args.seed_base + si
-            r = _run_one(
-                seed, cond_name, cond,
-                N_train=args.N_train, N_total=args.N_total,
-                epochs=args.epochs, steps_per_epoch=args.steps_per_epoch,
-                ood_ratio=args.ood_ratio,
-            )
-            rows.append(r)
-            print(
-                f"  [seed={seed}] "
-                f"train={r['train_acc_overall']:.3f} "
-                f"in_range={r['test_random_in_range']:.3f}  "
-                f"len100={r['test_length_100']:.3f}  "
-                f"len200={r['test_length_200']:.3f}  "
-                f"({r['wall_s']:.1f}s)"
-            )
+    summary = run_causal_ablation(
+        _run_one,
+        n_seeds=args.n_seeds,
+        seed_base=args.seed_base,
+        conditions=CONDITIONS,
+        primary_metrics=(
+            "train_acc_overall",
+            "test_random_in_range",
+            "test_length_100",
+            "test_length_200",
+        ),
+        N_train=args.N_train, N_total=args.N_total,
+        epochs=args.epochs, steps_per_epoch=args.steps_per_epoch,
+        ood_ratio=args.ood_ratio,
+    )
+    summary["config"] |= vars(args) | {"out": str(args.out)}
 
-        cs = {
-            "config": cond,
-            "per_seed": rows,
-            "train_acc": _stats([r["train_acc_overall"] for r in rows]),
-            "test_random_in_range": _stats(
-                [r["test_random_in_range"] for r in rows]),
-            "test_length_100": _stats(
-                [r["test_length_100"] for r in rows]),
-            "test_length_200": _stats(
-                [r["test_length_200"] for r in rows]),
-        }
-        summary["by_condition"][cond_name] = cs
-        rir = cs["test_random_in_range"]
-        l100 = cs["test_length_100"]
-        l200 = cs["test_length_200"]
-        print(
-            f"  → in_range = {rir['mean']:.3f} ± {rir['std']:.3f}  "
-            f"len100 = {l100['mean']:.3f} ± {l100['std']:.3f}  "
-            f"len200 = {l200['mean']:.3f} ± {l200['std']:.3f}"
-        )
+    # Backward-compat alias: older renderers / paper sections expect
+    # `train_acc` rather than `train_acc_overall` at the cond-summary
+    # top level.
+    for cond_name, cs in summary["by_condition"].items():
+        if "train_acc_overall" in cs and "train_acc" not in cs:
+            cs["train_acc"] = cs["train_acc_overall"]
 
     (args.out / "summary.json").write_text(
-        json.dumps(summary, indent=2, ensure_ascii=False)
+        json.dumps(summary, indent=2, ensure_ascii=False, default=str)
     )
 
     print("\n" + "═" * 80)
     print("  cross-condition summary (3 test splits, mean ± std):")
     print(f"  {'condition':<16s} {'in_range':>16s} {'len_100':>16s} "
           f"{'len_200':>16s}")
-    for cond_name in args.conditions:
-        if cond_name not in summary["by_condition"]:
-            continue
-        cs = summary["by_condition"][cond_name]
+    for cond in CONDITIONS:
+        cs = summary["by_condition"][cond.name]
         rir = cs["test_random_in_range"]
         l100 = cs["test_length_100"]
         l200 = cs["test_length_200"]
         print(
-            f"  {cond_name:<16s} "
+            f"  {cond.name:<16s} "
             f"{rir['mean']:>8.3f}±{rir['std']:.3f}   "
             f"{l100['mean']:>8.3f}±{l100['std']:.3f}   "
             f"{l200['mean']:>8.3f}±{l200['std']:.3f}"
