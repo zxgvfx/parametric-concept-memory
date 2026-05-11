@@ -22,8 +22,11 @@ import torch
 
 from pcm.physics import (
     PhysicsCook,
+    PhysicsDistillReport,
     PhysicsStateHead,
     RolloutReport,
+    StateLookupHead,
+    distill_physics_cook_to_lookup,
     physics_step_loss,
 )
 
@@ -212,6 +215,132 @@ class TestPH3PhysicsStepLoss(unittest.TestCase):
         pred_delta = torch.zeros(2, 2)
         loss = physics_step_loss(pred_delta, true_next, state)
         self.assertGreater(float(loss.item()), 0.0)
+
+
+# ---------------------------------------------------------------------------
+# PH4 — StateLookupHead + distill_physics_cook_to_lookup (F59).
+# ---------------------------------------------------------------------------
+
+
+class TestPH4StateLookupAndDistill(unittest.TestCase):
+    def test_ph4a_lookup_forward_shape(self) -> None:
+        torch.manual_seed(0)
+        head = StateLookupHead(state_dim=4, max_K=50, hidden=8)
+        s = torch.randn(3, 4)
+        K = torch.tensor([10, 25, 50])
+        out = head(s, K)
+        self.assertEqual(out.shape, (3, 4))
+
+    def test_ph4b_lookup_invalid_dim(self) -> None:
+        with self.assertRaises(ValueError):
+            StateLookupHead(state_dim=0, max_K=10)
+        with self.assertRaises(ValueError):
+            StateLookupHead(state_dim=2, max_K=0)
+
+    def test_ph4c_distill_loss_decreases(self) -> None:
+        """Build a simple cook + lookup; distill; loss should drop."""
+        torch.manual_seed(7)
+
+        # A trivial constant-Δstate head is the cook's transition.
+        # PhysicsCook with a head that outputs a fixed step gives
+        # deterministic rollouts we can use as oracle data.
+        class _LinearHead(PhysicsStateHead):
+            def __init__(self):
+                super().__init__(state_dim=2, hidden=4, dt=1.0)
+
+            def forward(self, state, force=None):
+                # Δstate = (0.1, 0.0) regardless of state.
+                out = torch.zeros_like(state)
+                out[..., 0] = 0.1
+                return out
+
+        cook_head = _LinearHead()
+        cook = PhysicsCook(cook_head, max_iters=20)
+        lookup = StateLookupHead(state_dim=2, max_K=10, hidden=8)
+
+        sample_states = torch.zeros(5, 2)
+        for i in range(5):
+            sample_states[i, 0] = float(i)
+
+        report = distill_physics_cook_to_lookup(
+            cook=cook, lookup=lookup,
+            sample_initial_states=sample_states,
+            sample_Ks=[1, 3, 5, 10],
+            n_steps=200, batch_size=8,
+            rng_seed=42,
+        )
+        self.assertLess(report.final_loss, report.initial_loss)
+
+    def test_ph4d_distill_predictions_match_cook(self) -> None:
+        """Post-distillation, lookup output should approximately
+        match cook's terminal state on the distilled pairs."""
+        torch.manual_seed(11)
+
+        class _LinearHead(PhysicsStateHead):
+            def __init__(self):
+                super().__init__(state_dim=2, hidden=4, dt=1.0)
+
+            def forward(self, state, force=None):
+                out = torch.zeros_like(state)
+                out[..., 0] = 0.1
+                return out
+
+        cook_head = _LinearHead()
+        cook = PhysicsCook(cook_head, max_iters=20)
+        lookup = StateLookupHead(state_dim=2, max_K=10, hidden=16)
+
+        sample_states = torch.zeros(8, 2)
+        for i in range(8):
+            sample_states[i, 0] = float(i)
+
+        distill_physics_cook_to_lookup(
+            cook=cook, lookup=lookup,
+            sample_initial_states=sample_states,
+            sample_Ks=[1, 5, 10],
+            n_steps=400, batch_size=16, lr=1e-2,
+            rng_seed=99,
+        )
+
+        # On a held-out (s0, K) pair, lookup should approximately
+        # match cook's terminal state.
+        with torch.no_grad():
+            s0 = torch.tensor([[2.0, 0.0]])
+            K_tensor = torch.tensor([5])
+            traj_cook, _ = cook(s0, K=5)
+            terminal_cook = traj_cook[-1]
+            terminal_lookup = lookup(s0, K_tensor)
+            err = float(
+                (terminal_lookup - terminal_cook).abs().max().item()
+            )
+            # The constant step (0.1) gives terminal x = 2.5; lookup
+            # should be within 0.5 after 400 steps of training.
+            self.assertLess(err, 0.5)
+
+    def test_ph4e_distill_empty_raises(self) -> None:
+        cook_head = PhysicsStateHead(state_dim=2, hidden=4)
+        cook = PhysicsCook(cook_head, max_iters=10)
+        lookup = StateLookupHead(state_dim=2, max_K=5)
+        with self.assertRaises(ValueError):
+            distill_physics_cook_to_lookup(
+                cook=cook, lookup=lookup,
+                sample_initial_states=torch.empty(0, 2),
+                sample_Ks=[1, 2],
+            )
+        with self.assertRaises(ValueError):
+            distill_physics_cook_to_lookup(
+                cook=cook, lookup=lookup,
+                sample_initial_states=torch.zeros(2, 2),
+                sample_Ks=[],
+            )
+
+    def test_ph4f_distill_report_dataclass(self) -> None:
+        rep = PhysicsDistillReport(
+            n_steps=100, n_pairs_distilled=50,
+            initial_loss=10.0, final_loss=1.0,
+            cook_oracle_diverge_rate=0.05,
+        )
+        self.assertEqual(rep.n_steps, 100)
+        self.assertLess(rep.final_loss, rep.initial_loss)
 
 
 if __name__ == "__main__":

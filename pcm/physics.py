@@ -46,6 +46,9 @@ __all__ = [
     "PhysicsCook",
     "RolloutReport",
     "physics_step_loss",
+    "StateLookupHead",
+    "distill_physics_cook_to_lookup",
+    "PhysicsDistillReport",
 ]
 
 
@@ -312,3 +315,175 @@ class PhysicsCook:
             diverged=diverged,
             step_history=history,
         )
+
+
+# ---------------------------------------------------------------------------
+# F59 — physics sleep cache: cook → lookup distillation.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PhysicsDistillReport:
+    """Diagnostics from :func:`distill_physics_cook_to_lookup`."""
+
+    n_steps: int
+    n_pairs_distilled: int
+    initial_loss: float
+    final_loss: float
+    cook_oracle_diverge_rate: float = 0.0
+
+
+class StateLookupHead(nn.Module):
+    """Direct ``(state_0, K) → state_K`` lookup, the v4 analogue of
+    the F53 RPE classifier. Trained by distillation from a cook
+    oracle (see :func:`distill_physics_cook_to_lookup`).
+
+    Once distilled, a single forward pass replaces a K-step cook
+    rollout — orders of magnitude faster on neuromorphic
+    inference. This is the **mature-physicist** pathway: novice
+    runs the cook every time, expert has cached the (s₀, K) →
+    s_K mapping.
+
+    Args:
+        state_dim: dimensionality D of the state vector.
+        max_K: largest horizon the lookup is trained for. The
+            head receives ``K`` as a normalised float input
+            ``K / max_K``.
+        hidden: MLP hidden width.
+    """
+
+    def __init__(
+        self, state_dim: int, *, max_K: int = 100, hidden: int = 64,
+    ) -> None:
+        super().__init__()
+        if state_dim < 1:
+            raise ValueError(f"state_dim must be >= 1, got {state_dim}")
+        if max_K < 1:
+            raise ValueError(f"max_K must be >= 1, got {max_K}")
+        self.state_dim = int(state_dim)
+        self.max_K = int(max_K)
+        # Input: state_dim (initial state) + 1 (normalised K).
+        self.fc1 = nn.Linear(state_dim + 1, hidden)
+        self.fc2 = nn.Linear(hidden, hidden)
+        self.fc3 = nn.Linear(hidden, state_dim)
+
+    def forward(
+        self, state: torch.Tensor, K: torch.Tensor,
+    ) -> torch.Tensor:
+        """Predict ``state_K`` given ``(state_0, K)``.
+
+        Args:
+            state: ``(B, state_dim)`` initial state.
+            K: ``(B,)`` integer horizons (will be normalised).
+
+        Returns ``(B, state_dim)`` predicted state at horizon K.
+        """
+        K_norm = (K.float() / self.max_K).unsqueeze(-1)
+        x = torch.cat([state, K_norm], dim=-1)
+        h = F.relu(self.fc1(x))
+        h = F.relu(self.fc2(h))
+        return self.fc3(h)
+
+
+def distill_physics_cook_to_lookup(
+    cook: PhysicsCook,
+    lookup: StateLookupHead,
+    *,
+    sample_initial_states: torch.Tensor,
+    sample_Ks: list[int],
+    optimizer: torch.optim.Optimizer | None = None,
+    lr: float = 5e-3,
+    n_steps: int = 400,
+    batch_size: int = 64,
+    rng_seed: int = 0,
+) -> PhysicsDistillReport:
+    """Sleep cache for the physics cook — F59 v4 analogue of F53
+    :func:`pcm.dual_process.distill_cook_to_rpe`.
+
+    For each ``(s0, K)`` pair sampled from the cross-product of
+    ``sample_initial_states × sample_Ks``, runs the cook to get
+    the K-step rollout terminus and trains
+    :class:`StateLookupHead` to predict it directly.
+
+    The function is decoupled from any specific cook architecture
+    or domain assumption — pass any cook + lookup pair and it
+    will distill them.
+
+    Args:
+        cook: trained :class:`PhysicsCook` whose K-step rollouts
+            serve as the distillation oracle.
+        lookup: :class:`StateLookupHead` to be trained.
+        sample_initial_states: ``(N_states, state_dim)`` tensor.
+        sample_Ks: list of integer horizons to distill.
+        optimizer: optional pre-configured optimiser; if ``None``,
+            a fresh AdamW is created.
+        lr: learning rate.
+        n_steps: distillation gradient steps.
+        batch_size: pairs per gradient step.
+        rng_seed: deterministic sampling.
+
+    Returns a :class:`PhysicsDistillReport`.
+    """
+    import random
+
+    if sample_initial_states.numel() == 0:
+        raise ValueError("sample_initial_states must be non-empty")
+    if not sample_Ks:
+        raise ValueError("sample_Ks must be non-empty")
+
+    if optimizer is None:
+        optimizer = torch.optim.AdamW(lookup.parameters(), lr=lr)
+
+    rng = random.Random(rng_seed)
+    target_device = next(lookup.parameters()).device
+    sample_initial_states = sample_initial_states.to(target_device)
+
+    # Pre-compute cook oracle for all (s0, K) pairs.
+    n_states = sample_initial_states.shape[0]
+    pool: list[tuple[torch.Tensor, int, torch.Tensor]] = []
+    n_diverged = 0
+    for s_idx in range(n_states):
+        s0 = sample_initial_states[s_idx:s_idx + 1]  # (1, D)
+        for K in sample_Ks:
+            traj, rep = cook(s0, K=K)
+            if rep.diverged:
+                n_diverged += 1
+                continue
+            terminal = traj[-1].squeeze(0)  # (D,)
+            pool.append((s0.squeeze(0), int(K), terminal))
+    if not pool:
+        raise RuntimeError(
+            "All cook rollouts diverged on the supplied "
+            "(s0, K) sample; cannot distill."
+        )
+    diverge_rate = n_diverged / max(n_states * len(sample_Ks), 1)
+
+    # Initial loss for reporting.
+    with torch.no_grad():
+        states = torch.stack([p[0] for p in pool])
+        Ks = torch.tensor([p[1] for p in pool], device=target_device)
+        targets = torch.stack([p[2] for p in pool])
+        preds = lookup(states, Ks)
+        initial_loss = float(F.mse_loss(preds, targets).item())
+
+    # Distillation loop.
+    final_loss = initial_loss
+    for _ in range(n_steps):
+        batch = [pool[rng.randrange(len(pool))] for _ in range(batch_size)]
+        states = torch.stack([b[0] for b in batch])
+        Ks = torch.tensor([b[1] for b in batch], device=target_device)
+        targets = torch.stack([b[2] for b in batch])
+        preds = lookup(states, Ks)
+        loss = F.mse_loss(preds, targets)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        final_loss = float(loss.item())
+
+    return PhysicsDistillReport(
+        n_steps=n_steps,
+        n_pairs_distilled=len(pool),
+        initial_loss=initial_loss,
+        final_loss=final_loss,
+        cook_oracle_diverge_rate=diverge_rate,
+    )
