@@ -199,6 +199,9 @@ def _run_one(
     batch_size: int = 64, lr: float = 5e-3,
     attn_logit_scale: float = 1.0,
     gate_mode: str = "fixed",
+    reward_alpha: float = 0.0,
+    reward_holdout_frac: float = 0.05,
+    gate_l1_beta: float = 0.0,
 ) -> dict:
     torch.manual_seed(seed)
     rng = random.Random(seed)
@@ -207,7 +210,28 @@ def _run_one(
         n_rows_train, n_cols_train, n_rows_total, n_cols_total,
         ood_ratio, seed,
     )
-    train_pool = splits["train"]
+    train_pool_full = splits["train"]
+    # A2+ "reward signal": split train_pool into a main inner pool
+    # and a holdout pool. The holdout pool is *also in-range* but is
+    # NOT used to optimise the head's accuracy directly; instead its
+    # cross-entropy is added to the main loss with weight
+    # ``reward_alpha``. The intuition (user's "学习要动力" / "learning
+    # needs reward"): a model that *only* sees the main inner pool
+    # has zero gradient pressure to close the slot-attention gate
+    # because train_acc=1.0 saturates train_loss. A small auxiliary
+    # signal asking "do you still get unseen pairs right?" simulates
+    # the reward that would push the model toward simpler, more
+    # generalisable hypotheses.
+    if reward_alpha > 0.0 and reward_holdout_frac > 0.0:
+        rng_split = random.Random(seed + 7777)
+        pool_shuffled = list(train_pool_full)
+        rng_split.shuffle(pool_shuffled)
+        n_holdout = max(1, int(len(pool_shuffled) * reward_holdout_frac))
+        reward_pool = pool_shuffled[:n_holdout]
+        train_pool = pool_shuffled[n_holdout:]
+    else:
+        reward_pool = []
+        train_pool = list(train_pool_full)
 
     cg = ConceptGraph(feat_dim=SLOT_DIM)
     for r in range(n_rows_total):
@@ -289,6 +313,45 @@ def _run_one(
                 )
                 logits = head(dr, dc, slot_a, slot_b)
             loss = F.cross_entropy(logits, tgt)
+
+            # A2+ reward: cross-entropy on the held-out reward
+            # pool, weighted by reward_alpha. This is the "学习要
+            # 动力" experiment — give the gate gradient pressure
+            # by adding a signal that is not zeroed out at
+            # train_acc=1.0.
+            if reward_alpha > 0.0 and reward_pool:
+                rb = [reward_pool[rng.randrange(len(reward_pool))]
+                      for _ in range(batch_size)]
+                rdr, rdc = _displacement(rb)
+                rtgt = torch.tensor([t[2] for t in rb], device=DEVICE)
+                if variant == "rpe_only":
+                    rlog = head(rdr, rdc)
+                else:
+                    rids_a = [cid_of(*t[0]) for t in rb]
+                    rids_b = [cid_of(*t[1]) for t in rb]
+                    rsa, _ = collapse_dual_channel(
+                        cg, caller="rew-a", base_facet=BASE_FACET,
+                        concept_ids=rids_a,
+                        slot_shape=(SLOT_DIM,), attr_shape=(ATTR_DIM,),
+                        tick=epoch * 20000 + step_i, device=DEVICE,
+                    )
+                    rsb, _ = collapse_dual_channel(
+                        cg, caller="rew-b", base_facet=BASE_FACET,
+                        concept_ids=rids_b,
+                        slot_shape=(SLOT_DIM,), attr_shape=(ATTR_DIM,),
+                        tick=epoch * 20000 + step_i + 1, device=DEVICE,
+                    )
+                    rlog = head(rdr, rdc, rsa, rsb)
+                loss = loss + reward_alpha * F.cross_entropy(rlog, rtgt)
+
+            # "Self-discipline" (gate L1) — explicit regulariser
+            # pushing the learned gate toward 0. Only meaningful in
+            # gate_mode='learned'.
+            if gate_l1_beta > 0.0 and gate_mode == "learned":
+                loss = loss + gate_l1_beta * torch.sigmoid(
+                    head.attn_gate_logit
+                )
+
             opt.zero_grad(); loss.backward(); opt.step()
 
     head.eval()
@@ -367,6 +430,20 @@ def main() -> None:
                          "linearly 1.0 -> 0.0 across first half of "
                          "training; 'learned' uses a sigmoid'd scalar "
                          "parameter and reports its final value.")
+    ap.add_argument("--reward-alpha", type=float, default=0.0,
+                    help="A2+ 'reward signal' weight: weights the "
+                         "auxiliary cross-entropy on a held-out "
+                         "fraction of the train pool. >0 simulates "
+                         "a 'learning needs reward' incentive that "
+                         "pushes a learned gate to close.")
+    ap.add_argument("--reward-holdout-frac", type=float, default=0.05,
+                    help="fraction of train pool reserved as the "
+                         "reward signal pool when --reward-alpha > 0")
+    ap.add_argument("--gate-l1-beta", type=float, default=0.0,
+                    help="A2+ 'self-discipline': L1 penalty on "
+                         "sigmoid(gate_logit) pushing the learned "
+                         "gate toward 0. Only meaningful with "
+                         "--gate-mode learned.")
     ap.add_argument("--out", type=Path,
                     default=Path("outputs/v3_rpe"))
     args = ap.parse_args()
@@ -394,6 +471,9 @@ def main() -> None:
             variant=args.variant,
             attn_logit_scale=args.attn_logit_scale,
             gate_mode=args.gate_mode,
+            reward_alpha=args.reward_alpha,
+            reward_holdout_frac=args.reward_holdout_frac,
+            gate_l1_beta=args.gate_l1_beta,
         )
         rows.append(r)
         gate_str = ""

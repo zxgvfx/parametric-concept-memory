@@ -393,6 +393,61 @@ present, not `"fixed"` or `"learned"`. The schedule is cheap
 and recovers the architectural lever; learned gates require a
 training signal that is rarely available pre-deployment.
 
+**A2+ — "learning needs incentives" decomposed.** A reviewer
+suggested an analogy: the model's failure to close its own gate
+in A2 mirrors a human truth — "learning is painful, students do
+not simplify spontaneously without reward (grades, money,
+satisfaction)". We tested two operationalisations of the
+analogy and discovered they are *not* interchangeable:
+
+* **α (reward / 动力)**: an auxiliary cross-entropy on a held-out
+  5 % of the train pool, weighted by α and added to the main
+  loss. This is the closest analogue to "give the student extra
+  marks for unseen problems".
+* **β (self-discipline / 自律)**: an L1 penalty on
+  `sigmoid(gate_logit)`, weighted by β. This is a direct
+  regulariser pushing the gate to close, with no notion of a
+  task signal — the analogue of "study hygiene / explicit
+  simplification habit".
+
+Five configurations (gate_mode=learned, 5 seeds × 20 epochs each):
+
+| α (reward) | β (L1) | mixed_OOD | λ_final | reading |
+| --- | --- | --- | --- | --- |
+| 0.0 | 0.0 | 0.720 ± 0.249 | 0.982 | unmotivated |
+| 0.5 | 0.0 | 0.900 ± 0.141 | 0.978 | reward → study harder, gate stuck |
+| 2.0 | 0.0 | 0.760 ± 0.222 | 0.982 | reward too strong → distraction |
+| **0.0** | **0.1** | **1.000 ± 0.000** | **0.002** | **L1 alone closes the gate** |
+| 0.5 | 0.1 | 1.000 ± 0.000 | 0.002 | reward redundant once L1 active |
+
+Two precise corrections to the original analogy:
+
+1. **Reward (α) does NOT close the gate.** It *can* make the
+   non-gate components (RPE) work harder and improves
+   mixed_OOD to ≈0.9, but the gate stays at ≈0.98 across all
+   reward strengths. Reward is "studying harder", not
+   "simplifying".
+2. **Self-discipline (β) alone fully closes the gate.** β=0.1
+   without any reward gets λ_final = 0.002 and mixed_OOD =
+   1.000. The mechanism is direct: L1 penalty on the gate
+   logit creates the gradient pressure the train loss never
+   provides.
+
+This connects to a wider ML pattern (Lottery Ticket / network
+pruning / weight regularisation): models do not spontaneously
+discover their own minimum sufficient statistic; that property
+must be *imposed* through explicit simplification pressure. In
+the human analogue: rewards motivate effort, but only an
+explicit habit of simplification (or an external schedule, the
+A1 setup above) actually purges redundant components.
+
+For PCM v2: pair-input heads using `RelativePositionEmbedding`
+should set either (a) `gate_mode="schedule"` (cheapest, no
+hyperparams), or (b) `gate_mode="learned"` *with* an L1 penalty
+on the gate (≈0.1 was sufficient on V3). Either is structurally
+equivalent to the human habit of "stop using a tool the moment
+it stops being useful".
+
 **Three structural lessons** from the chain:
 
 1. The `mixed_OOD = 0.000` ceiling is **not** a bundle-level
