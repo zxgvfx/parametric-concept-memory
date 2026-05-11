@@ -799,6 +799,25 @@ failure modes precisely literature-mappable, with corresponding
 fixes already implemented. This makes sleep abstraction a tunable,
 falsifiable, literature-aligned subsystem rather than a hand-wave.
 
+#### 6.6.4  Limitations and next steps
+
+* OOD-Pareto-better holds strictly only on the number domain;
+  colour and space tasks are not inductive-generalisation
+  benchmarks at this scale, so a sharper transfer / few-shot
+  test bed is needed to seriously evaluate sleep's downstream
+  benefit there.
+* Phoneme per-axis N is 2/4/4, so sleep on phoneme is
+  essentially an identity transformation; cross-language
+  transfer (§6.9) is the more meaningful target for the
+  Sun et al. 2023 generalisation-conditional consolidation
+  framework on this domain.
+* Phase E replay code path is implemented but our 4-domain
+  experiments run at ``replay_steps = 0``; long-run
+  continual-learning ablation is queued for a follow-up paper.
+* Current sleep is most stable as "single pass + warmup";
+  multi-pass sleep with EMA at large N remains an open
+  stability question.
+
 ### 6.7  Sleep does *not* invent perceptual primitives (negative)
 
 §7 below tests whether wake-time SGD spontaneously emerges human
@@ -1275,7 +1294,7 @@ in a way that cognitive science routinely conflates.
 
 ![F13 §7.5 length extrapolation: 5 conditions × {in-range OOD, length-100 OOD}, 5 seeds; A/B/C strictly at chance, D/BCD give a statistically detectable but small lift](./docs/figures/F13_number_extrapolate.png)
 
-#### 7.5-color  Colour-domain analogue: hue holdout reveals the closed-output-set ceiling
+### 7.5-color  Colour-domain analogue: hue holdout reveals the closed-output-set ceiling
 
 §7.5 number's ceiling is "chance level + 1.1 pp". The colour
 domain admits a cleaner test: **hold out a target hue** (every

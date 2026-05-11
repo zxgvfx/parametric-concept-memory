@@ -11,7 +11,8 @@
 > *Concepts Collapse into Muscles — Domain-Topology-Adaptive Parametric
 > Concept Memory.*
 >
-> 概念坍缩为肌肉：一种随领域拓扑自适应的参数概念记忆框架。
+> 概念坍缩为肌肉：一种随领域拓扑自适应的参数概念记忆框架，以及
+> 一个面向认知科学的可证伪研究台。
 
 ## 项目简介
 
@@ -26,41 +27,82 @@
 `bundle.consumed_by[facet]`。换句话说，"概念属于哪里"从一个解释学
 问题，变成了一个可查询的数据结构问题。
 
-完整论文见 [`PAPER.md`](./PAPER.md)。论文图表见
-[`docs/figures/`](./docs/figures/)。
+在四领域实证主体（数字 / 颜色 / 空间 / 音素）之上，PCM 还提供：
+
+- **Tier-G sleep abstraction 子系统**，含七条可证伪不变量
+  G1–G7（详见 `pcm/sleep.py` 与
+  `docs/PCM_TIER_G_SLEEP_ABSTRACTION.md`）；
+- **A / B / C / D / B+C+D 五条件因果消融协议**，对应人类三色觉
+  literature 的三层因果（生物先验 / 生态统计 / 任务驱动），
+  让任何"候选表征基元 *Y* 是否需要外部先验"的认知科学问题都
+  可以被精确切片测试。
+
+完整论文见 [`PAPER.md`](./PAPER.md)（英文）和
+[`PAPER.zh-CN.md`](./PAPER.zh-CN.md)（中文，本仓库权威版本）。
+2700 词的英文短文版本（用于 *Trends in Cognitive Sciences*
+Forum / *Cognitive Science* short report）见
+[`docs/SHORT_REPORT_EN.md`](./docs/SHORT_REPORT_EN.md)。
+十二张论文级图表见 [`docs/figures/`](./docs/figures/)。
 
 ![四领域 bundle 几何普适性](./docs/figures/F4_four_domain_universality.png)
 
 ## 核心结论
 
-| # | 结论 | 证据 |
-|---|---|---|
-| 1 | 归因是查字典，不是事后推断 | 在 7 个数概念的 toy 实验中，H1-H4 全部 100% 通过（`experiments/purity_audit.py`）。 |
-| 2 | Bundle 几何会贴合任务拓扑 | 数字：`ρ = 0.991`；颜色：`ρ_circ = 0.977`；空间：`ρ_L1 = 0.860` / Procrustes disparity `0.07`；音素：类内外余弦间距 `+1.2` 到 `+2.0`。 |
-| 3 | 跨 muscle 对齐由 facet 级代数兼容性决定 | 同代数任务显著对齐；同领域但代数不兼容时不对齐；正交类别轴基本不对齐。 |
-| 4 | Bundle 是概念语义身份的因果载体 | 训练后交换两个概念某个 facet 的 bundle，只会精准击中消费该 facet 的 muscle 和相关概念对。 |
-| 5 | PCM 产生几何涌现，不自动产生算法涌现 | 纯 base-10 分解不会自发出现；加入手写位置先验后才能恢复任意位数泛化。 |
+| # | 结论 | 证据 | 章节 |
+|---|---|---|---|
+| 1 | 归因是查字典，不是事后推断 | 7 个数 toy 上 H1-H4 全部 100% 通过 | §4.2 |
+| 2 | Bundle 几何会贴合任务拓扑 | 数字 ρ = 0.991；颜色 ρ_circ = 0.977；空间 ρ_L1 = 0.860；音素 cos gap +1.2 到 +2.0 | §4–§6.5 |
+| 3 | 跨 muscle 对齐由 facet 级代数兼容性决定 | 同代数对齐 (p = 0.003, 0.016)；不兼容代数 null (p = 0.77)；正交类别 null | §6.4 |
+| 4 | Bundle 是概念语义身份的因果载体 | 训练后 bundle swap 触发精准 double dissociation，零 seed 方差 | §8 + 附录 B |
+| 5 | PCM 给几何涌现，不自动给算法涌现 | base-10 不会自发涌现 (spike₁₀ ≈ 0.001) | §7 |
+| 6 | **Tier-G sleep abstraction 在 4 域上严格安全**（无任务退化），并在难度匹配的非饱和域上 Pareto-better | F9：number 域 ΔOOD = +0.018；颜色 ρ-std 缩到 38% | §6.6 |
+| 7 | **PCM 不会自发涌现 perceptual primaries**（24 seed 颜色环旋转分析；RYB 0/24 命中） | F11 §6.7 | §6.7 |
+| 8 | **三层因果协议能驱动 RGB-aligned anchors**；cyclic 任务下 D（任务驱动）主导 | F11 §6.8：red-wedge 0.62 → 1.00（8/8 seed） | §6.8 |
+| 9 | **三层因果协议反转 §7 base-10 negative**；D 让 spike₁₀ 翻倍（×2.3），units_gap 符号翻转，purity 0.876 | F12 §7.4：5 cond × 8 seed | §7.4 |
+| 10 | **长度外推有清晰的架构上限**（D91/D92）：A/B/C 严格 chance，D/BCD 仅 +1.1 pp；颜色 hue holdout 25/25 严格 0.000 | F13/F14 §7.5 / §7.5-color | §7.5 |
+| 11 | **音素跨语言迁移 B-dominant**（articulator centroid 单独 V/M/P transfer 1.000 / 0.943 / 0.771）；揭示**任务对称群 × dominant-layer 原则**：cyclic/translational 任务需 D，orthogonal-categorical 任务可由 B 单独承担 | F15 §6.9：5 cond × 5 seed | §6.9 |
 
 ## 仓库结构
 
 ```text
-pcm/                      核心框架
-├── concept_graph.py      ConceptGraph + ConceptNode
-├── param_bundle.py       ParamBundle + ContextualizedConcept
-└── heads/                任务 muscle/head
+pcm/                       核心框架
+├── concept_graph/         ConceptGraph + ConceptNode（已模块化）
+├── param_bundle/          ParamBundle + ContextualizedConcept
+├── heads/                 任务 muscle/head + Tier-D cook 层
+├── sleep.py               Tier-G sleep abstraction（G1-G7 不变量）
+├── gate.py                Tier-B slot gates
+├── peer.py                Tier-C peer discovery
+├── graph_eval.py          GraphEvaluator（cookable subgraph 执行器）
+└── dna_ops.py             DNA op registry（concept.codebook_lookup 等）
 
-experiments/              论文复现实验
-├── robustness_study.py
-├── purity_audit.py
-├── scale_study.py
-├── color_concept_study.py
-├── space_concept_study.py
-├── phoneme_concept_study.py
-├── emergent_base10_study.py
-└── counterfactual_swap_study.py
+experiments/               论文复现 + ablation 入口
+├── color_concept_study/   §5 颜色研究
+├── space_concept_study/   §6.2 空间研究
+├── phoneme_concept_study/ §6.3 音素研究
+├── counterfactual_swap_study/  附录 B 因果 swap
+├── purity_audit/          §4.4 归因审计
+├── render_paper_figures/  F2-F8 + F9 + F11-F15 渲染器
+├── quad_study.py          §4.5 四运算 + Tier-G 接入
+├── number_decimal_priors.py   §7.4：decimal cones + LastDigitHead
+├── phoneme_transfer_priors.py §6.9：articulator cones + MinimalPairHead
+├── sleep_ablation.py             §6.6 V2/V3 ablation
+├── sleep_ablation_four_domain.py §6.6 四域 × 5-seed 安全性
+├── sleep_color_primaries.py      §6.8 颜色 5-cond × 8-seed
+├── sleep_inspect_color_anchors.py §6.7 24-seed 旋转分析
+├── sleep_number_decimal.py       §7.4 数字 5-cond × 8-seed
+├── sleep_number_extrapolate.py   §7.5 长度 OOD ceiling
+├── sleep_color_holdout.py        §7.5-color hue holdout ceiling
+└── sleep_phoneme_transfer.py     §6.9 跨语言迁移
 
-docs/figures/             论文图表
-PAPER.md                  完整论文
+tests/                     63 个单元测试（Tier-A/B/C/D + Tier-G G1-G7 + 集成）
+
+docs/
+├── figures/               F2-F8 + F9, F11, F12, F13, F14, F15
+├── PCM_TIER_G_SLEEP_ABSTRACTION.md  Tier-G 设计文档
+└── SHORT_REPORT_EN.md     英文短文（TICS Forum / Cog-Sci 投稿）
+
+PAPER.md / PAPER.zh-CN.md  完整论文（英文 / 中文）
+CHANGELOG.md               D91-D96 变更记录与文献映射
 ```
 
 ## 安装
@@ -135,11 +177,99 @@ python -m experiments.emergent_base10_study --scan 50 100 --n-seeds 3
 python -m experiments.counterfactual_swap_study --n-seeds 3
 ```
 
-重新生成论文图表：
+### Tier-G + 三层因果消融实验
+
+支持论文 §6.6 / §6.7 / §6.8 / §6.9 / §7.4 / §7.5 / §7.5-color
+的六个额外实验（单 GPU 上累计约 1 小时）：
 
 ```bash
-python -m experiments.render_paper_figures
+# §6.6 — 4 域 Tier-G 安全性（5 seed × 4 domain × A/C 对照）
+python -m experiments.sleep_ablation_four_domain --n-seeds 5 \
+    --out outputs/sleep_ablation_4domain
+
+# §6.7 — 颜色环旋转分析（sleep 不会自发产生 RGB；24 seed × k ∈ {3,4,6}）
+python -m experiments.sleep_inspect_color_anchors --k 3 --n-seeds 8
+python -m experiments.sleep_inspect_color_anchors --k 4 --n-seeds 8
+python -m experiments.sleep_inspect_color_anchors --k 6 --n-seeds 8
+
+# §6.8 — 颜色域 5 条件 × 8 seed 三层因果消融
+python -m experiments.sleep_color_primaries --n-seeds 8 \
+    --out outputs/primaries_5cond_8seed
+
+# §6.9 — 音素跨语言迁移（B-dominant 验证）
+python -m experiments.sleep_phoneme_transfer --n-seeds 5 \
+    --n-target 7 --out outputs/phoneme_transfer_5seed
+
+# §7.4 — 数字 base-10 反转（D 主导：spike_10 +0.29 → +0.67）
+python -m experiments.sleep_number_decimal --n-seeds 8 \
+    --out outputs/decimal_5cond_8seed
+
+# §7.5 — 长度外推 ceiling（input-side）
+python -m experiments.sleep_number_extrapolate --N-train 30 --N-total 100 \
+    --n-seeds 5 --out outputs/extrap_30_100_5seed
+
+# §7.5-color — hue holdout ceiling（output-side；25/25 严格 0.000）
+python -m experiments.sleep_color_holdout --holdout-hue 5 --n-seeds 5 \
+    --out outputs/color_holdout_h5_5seed
 ```
+
+### 重新生成图表
+
+F2 / F4 / F5 / F6 / F7 / F8 共用一个入口脚本（约 3 分钟）；
+F9 / F11–F15 各自有独立 renderer（每个 < 10 秒，无需重训）：
+
+```bash
+# 原 4 域图表
+python -m experiments.render_paper_figures
+python -m experiments.render_paper_figures --only F4 F7
+
+# Tier-G + 三层因果新图表
+python -m experiments.render_paper_figures.F9_sleep_four_domain
+python -m experiments.render_paper_figures.F11_color_primaries
+python -m experiments.render_paper_figures.F12_number_decimal
+python -m experiments.render_paper_figures.F13_number_extrapolate
+python -m experiments.render_paper_figures.F14_color_holdout
+python -m experiments.render_paper_figures.F15_phoneme_transfer
+```
+
+## PCM 作为可证伪的认知科学研究台
+
+除了四领域实证，PCM 提供了一个方法论上明确的消融协议，用于回答
+"某个候选表征基元 *Y* 是否需要外部先验，还是会从一般性学习中
+自发出现"——详见
+[`docs/SHORT_REPORT_EN.md`](./docs/SHORT_REPORT_EN.md)
+（2700 词，对标 *Trends in Cognitive Sciences* Forum 与
+*Cognitive Science* short report）。
+
+协议是 **A / B / C / D / B+C+D** 五条件模板，对应人类三色觉
+literature 的三层因果（Stockman & Sharpe 2000；Jacobs 2009；
+Conway et al. 2007）：
+
+- **A** baseline：随机正交 centroid，均匀采样，无辅助 head；
+  纯对称任务。
+- **B** 生物先验：例如颜色域的 LMS-cone-like centroid，数字域
+  的 decimal cone centroid，音素域的 articulator cones。
+- **C** 生态统计：非均匀采样，加权任务相关输入分布。
+- **D** 任务驱动非对称性：辅助 head 把一小部分输入挑出来作为
+  行为相关（颜色 ripe-fruit head；数字 last-digit head；音素
+  minimal-pair head）。
+- **B+C+D**：三层叠加。
+
+跨颜色（§6.7 / §6.8）、数字（§7 / §7.4 / §7.5）与音素（§6.9）
+三个域，协议一致地：
+
+1. **反驳** 在对称任务下 perceptual primaries 自发涌现
+   （颜色 RGB / RYB 命中数严格等于 strict-equidistant 数；
+   24 seed 中 RYB 0 次命中；5 seed 数字 spike₁₀ ≈ 0.001）。
+2. **支持** 先验驱动的涌现：BCD 在颜色上达成 red-wedge 1.00，
+   在数字上达成 spike₁₀ +0.67，在音素上达成 V/M/P transfer
+   0.97 / 0.77 / 0.71。
+3. **预测** 哪一层 dominant：cyclic / translational 任务需要
+   D（颜色、数字）；orthogonal-categorical 任务则 B 单独
+   即可（音素）。
+4. **刻画** 干净的架构 ceiling：input-side（length-OOD-100 =
+   chance + 1.1 pp）与 output-side（hue-5 holdout = 25/25 严格
+   0.000）。
 
 ## 与相关工作的区别
 

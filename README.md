@@ -10,7 +10,7 @@
 
 > *Concepts Collapse into Muscles — Domain-Topology-Adaptive Parametric
 > Concept Memory.*
-> Code and full paper for the four-domain PCM study.
+> Code, full paper, and a falsifiable cognitive-science testbed.
 
 Instead of asking "which neurons represent concept *X*?", PCM makes
 the question a **dict lookup**: every `ConceptNode` in a symbolic
@@ -31,58 +31,84 @@ muscle consuming that facet on exactly the involved pairs (100 % →
 18.2 % for numbers, 5.3 % for colors) while every other muscle and
 every other concept stay at 100 %. Textbook double dissociation.
 
-Full paper in [`PAPER.md`](./PAPER.md). Six publication-quality
-figures in [`docs/figures/`](./docs/figures/).
+On top of the empirical core, PCM provides a **Tier-G sleep
+abstraction subsystem** with seven falsifiable invariants
+(G1–G7), and a **five-condition `A / B / C / D / B+C+D` causal
+ablation protocol** that lets researchers ask, of any candidate
+representational primitive, whether it can emerge unconditionally
+or whether it requires a biological prior, an ecological
+statistic, or a task-asymmetric pressure.
+
+Full paper in [`PAPER.md`](./PAPER.md) (English) and
+[`PAPER.zh-CN.md`](./PAPER.zh-CN.md) (Chinese). A 2,700-word
+short-report distillation of §6.7 / §6.8 / §7 / §7.4 / §7.5 /
+§7.5-color / §6.9 lives in
+[`docs/SHORT_REPORT_EN.md`](./docs/SHORT_REPORT_EN.md). Twelve
+publication-quality figures in [`docs/figures/`](./docs/figures/).
 
 ![Four-domain universality of bundle geometry](./docs/figures/F4_four_domain_universality.png)
 
 ## TL;DR of the claims
 
-| # | Claim | Evidence |
-|---|---|---|
-| 1 | Attribution is a dict lookup, not an inference | H1–H4 all pass at 100 % on a 7-numerosity toy (`experiments/purity_audit.py`). |
-| 2 | Bundle geometry tracks task topology across four qualitatively different domains | F4: ρ = 0.991 (numbers) · ρ_circ = 0.977 (colors) · ρ_L1 = 0.860 / Procrustes disp 0.07 (space) · intra-inter cos gap +1.2 to +2.0 (phonemes). |
-| 3 | Cross-muscle alignment is gated by **facet-level algebraic compatibility** (H5″), not by shared domain or task family | F7: 2×2 schema fully populated — same-algebra pairs align (p = 0.003, 0.016); same-domain incompatible-algebra pair is null (p = 0.77); orthogonal categorical axes are null (p ≥ 0.04). |
-| 4 | Bundle = concept semantic identity (causal, not correlational) | F6: post-hoc swap of two trained bundles on one facet causes targeted double dissociation with zero seed variance. |
-| 5 | PCM gives *geometric* emergence, not *algorithmic* — pure base-10 factorisation does not emerge | F5: spike₁₀ ≈ 0.001, p = 0.44; hand-coded positional priors recover 100 % extrapolation with ~10³ fewer samples than Abacus. |
+| # | Claim | Evidence | Section |
+|---|---|---|---|
+| 1 | Attribution is a dict lookup, not an inference | H1–H4 all pass at 100 % on a 7-numerosity toy | §4.2 |
+| 2 | Bundle geometry tracks task topology across four qualitatively different domains | F4: ρ = 0.991 (numbers) · ρ_circ = 0.977 (colors) · ρ_L1 = 0.860 / Procrustes disp 0.07 (space) · intra-inter cos gap +1.2 to +2.0 (phonemes) | §4–§6.5 |
+| 3 | Cross-muscle alignment is gated by **facet-level algebraic compatibility** (H5″), not by shared domain or task family | F7: 2×2 schema fully populated — same-algebra align (p = 0.003, 0.016); same-domain incompatible-algebra null (p = 0.77); orthogonal categorical null (p ≥ 0.04) | §6.4 |
+| 4 | Bundle = concept semantic identity (causal, not correlational) | F6: post-hoc swap causes targeted double dissociation with zero seed variance | §8 + Appendix B |
+| 5 | PCM gives *geometric* emergence, not *algorithmic* | F5: spike₁₀ ≈ 0.001, p = 0.44; hand-coded positional priors recover 100 % extrapolation with ~10³ fewer samples | §7 |
+| 6 | **Tier-G sleep abstraction is safe across all 4 domains** (no task-acc regression) and Pareto-better in task-difficulty-matched non-saturated regimes | F9: ΔOOD = +0.018 on number domain (5 seeds); ρ-std collapses to 38 % of baseline on colour | §6.6 |
+| 7 | **PCM does not invent perceptual primitives** under cyclic mixing alone (sleep abstraction with k ∈ {3, 4, 6} returns equidistant rotations of arbitrary orientation; RYB primaries hit 0/24) | F11 §6.7: 24-seed colour-ring rotation analysis | §6.7 |
+| 8 | **Three-causal-layer recipe drives RGB-aligned anchors** (B = LMS centroid, C = green-peak sampling, D = ripe-fruit head); D dominates under cyclic task symmetry | F11 §6.8: red-wedge anchor 0.62 → 1.00 (8/8 seeds) | §6.8 |
+| 9 | **Three-causal-layer recipe reverses the §7 base-10 negative**; D drives spike₁₀ from +0.290 to +0.667 (× 2.3), units_gap sign-flips, last-digit cluster purity 0.876 | F12 §7.4: 5 cond × 8 seeds | §7.4 |
+| 10 | **Length-extrapolation has a clean architectural ceiling** under D91/D92: A/B/C strictly at chance, D/BCD lift OOD by only +1.1 pp; colour hue-holdout is even cleaner (25/25 strictly 0.000) | F13/F14 §7.5 / §7.5-color | §7.5 |
+| 11 | **Phoneme cross-language transfer is B-dominant** (articulator centroid alone gives V/M/P transfer = 1.000 / 0.943 / 0.771); reveals a **task-symmetry × dominant-layer principle**: cyclic / translational tasks need D, orthogonal-categorical tasks let B transfer cleanly | F15 §6.9: 5 cond × 5 seeds | §6.9 |
 
 ## Repo layout
 
 ```
-pcm/                      core framework
-├── concept_graph.py      ConceptGraph + ConceptNode
-├── param_bundle.py       ParamBundle (nn.ParameterDict) + ContextualizedConcept
-└── heads/                task-specific muscles + Tier-D cook layer
-    ├── arithmetic_head_v2.py
-    ├── comparison_head.py
-    ├── numerosity_encoder.py      (+ DatasetConfig, generate_dot_canvas)
-    ├── numerosity_classifier.py
-    ├── cook_factory.py            (generic MLPBackbone / HeadAsBackbone /
-    │                              make_cook_subgraph)
-    └── cook_wrappers.py           (per-head build_*_cook factories)
+pcm/                       core framework
+├── concept_graph/         ConceptGraph + ConceptNode (packagified)
+├── param_bundle/          ParamBundle + ContextualizedConcept
+├── heads/                 task-specific muscles + Tier-D cook layer
+├── sleep.py               Tier-G sleep abstraction (G1-G7 invariants)
+├── gate.py                Tier-B slot gates
+├── peer.py                Tier-C peer discovery
+├── graph_eval.py          GraphEvaluator (cookable subgraph executor)
+└── dna_ops.py             DNA op registry (concept.codebook_lookup, etc.)
 
-experiments/              paper replications (run with `python -m experiments.<name>`)
-├── _graph_builder.py              shared ANS graph builder
-├── train_ans.py                   regenerate NumerosityEncoder checkpoint
-├── robustness_study.py            numbers §4
-├── purity_audit.py                numbers §4.4
-├── scale_study.py                 numbers §4.4
-├── quad_study.py                  numbers §4.5 (four-operation)
-├── emergent_base10_study.py       numbers §7 (negative)
-├── compositional_number_study.py  numbers §4.5 (slot + carry)
-├── color_concept_study.py         colors §5
-├── space_concept_study.py         space §6.2
-├── phoneme_concept_study.py       phonemes §6.3
-├── counterfactual_swap_study.py   causal swap, Appendix B
-└── render_paper_figures.py        regenerate F2-F8 (PDF + PNG)
+experiments/               paper replications + ablations (`python -m experiments.<name>`)
+├── color_concept_study/   §5 colour study (packagified)
+├── space_concept_study/   §6.2 space study
+├── phoneme_concept_study/ §6.3 phoneme study
+├── counterfactual_swap_study/  Appendix B causal swap
+├── purity_audit/          §4.4 attribution audit
+├── render_paper_figures/  F2-F8 + F9 + F11-F15 renderers
+├── quad_study.py          §4.5 four-operation arithmetic + Tier-G plumbing
+├── number_decimal_priors.py   §7.4: decimal cones + LastDigitHead + samplers
+├── phoneme_transfer_priors.py §6.9: articulator cones + MinimalPairHead
+├── sleep_ablation.py             §6.6 V2/V3 ablation (quad domain)
+├── sleep_ablation_four_domain.py §6.6 4-domain × 5-seed safety
+├── sleep_color_primaries.py      §6.8 colour 5-condition × 8-seed
+├── sleep_inspect_color_anchors.py §6.7 24-seed rotation analysis
+├── sleep_number_decimal.py       §7.4 number 5-condition × 8-seed
+├── sleep_number_extrapolate.py   §7.5 length OOD ceiling
+├── sleep_color_holdout.py        §7.5-color hue holdout ceiling
+└── sleep_phoneme_transfer.py     §6.9 cross-language transfer
 
-docs/                     per-study writeups + architectural design docs
-└── figures/              F2-F8 publication-quality figures
+tests/                     63 unit tests (Tier-A grow, Tier-B gate, Tier-C peer,
+                           Tier-D cook, Tier-G G1-G7, 4-domain integration)
+
+docs/
+├── figures/               F2-F8 + F9, F11, F12, F13, F14, F15 figures
+├── PCM_TIER_G_SLEEP_ABSTRACTION.md  full Tier-G design doc
+└── SHORT_REPORT_EN.md     2,700-word TICS Forum / Cog-Sci short report draft
 
 outputs/
-└── ans_encoder/final.pt  shipped pre-trained ANS encoder (≈ 108 KB)
+└── ans_encoder/final.pt   shipped pre-trained ANS encoder (≈ 108 KB)
 
-PAPER.md                  full paper (abstract, method, 4 experiments, appendices)
+PAPER.md / PAPER.zh-CN.md  full paper (English / Chinese)
+CHANGELOG.md               D91-D96 changelog with literature mapping
 ```
 
 ## Installation
@@ -160,16 +186,64 @@ python -m experiments.emergent_base10_study --scan 50 100 --n-seeds 3
 python -m experiments.counterfactual_swap_study --n-seeds 3
 ```
 
-### Regenerating the figures
+### Reproducing the Tier-G + three-causal-layer ablations
 
-Figures F2, F4, F5, F6, F7, F8 are all auto-generated by a single
-entry point (≈ 3 min — retrains one representative seed per domain
-for bundle access, reads summary JSONs for the rest):
+Six additional experiments support paper sections §6.6 / §6.7 /
+§6.8 / §6.9 / §7.4 / §7.5 / §7.5-color (≈ 1 hour total on a
+single GPU):
 
 ```bash
+# §6.6 — 4-domain Tier-G safety (5 seeds × 4 domains × A/C ablation)
+python -m experiments.sleep_ablation_four_domain --n-seeds 5 \
+    --out outputs/sleep_ablation_4domain
+
+# §6.7 — colour-ring rotation analysis (Sleep does NOT invent
+#         perceptual primitives; 24 seeds × k ∈ {3, 4, 6})
+python -m experiments.sleep_inspect_color_anchors --k 3 --n-seeds 8
+python -m experiments.sleep_inspect_color_anchors --k 4 --n-seeds 8
+python -m experiments.sleep_inspect_color_anchors --k 6 --n-seeds 8
+
+# §6.8 — colour 5-condition × 8-seed three-causal-layer ablation
+python -m experiments.sleep_color_primaries --n-seeds 8 \
+    --out outputs/primaries_5cond_8seed
+
+# §6.9 — phoneme cross-language transfer (B-dominant)
+python -m experiments.sleep_phoneme_transfer --n-seeds 5 \
+    --n-target 7 --out outputs/phoneme_transfer_5seed
+
+# §7.4 — number base-10 reversal (D dominates: spike_10 +0.29 → +0.67)
+python -m experiments.sleep_number_decimal --n-seeds 8 \
+    --out outputs/decimal_5cond_8seed
+
+# §7.5 — length extrapolation ceiling (input-side)
+python -m experiments.sleep_number_extrapolate --N-train 30 --N-total 100 \
+    --n-seeds 5 --out outputs/extrap_30_100_5seed
+
+# §7.5-color — hue holdout ceiling (output-side; 25/25 strictly 0.000)
+python -m experiments.sleep_color_holdout --holdout-hue 5 --n-seeds 5 \
+    --out outputs/color_holdout_h5_5seed
+```
+
+### Regenerating the figures
+
+Figures F2, F4, F5, F6, F7, F8 are auto-generated by a single
+entry point. Figures F9 (Tier-G safety), F11 (§6.8), F12 (§7.4),
+F13 (§7.5), F14 (§7.5-color), F15 (§6.9) are produced by
+dedicated renderers that read the corresponding `summary.json`:
+
+```bash
+# Original 4-domain figures (≈ 3 min)
 python -m experiments.render_paper_figures
 # or a subset:
 python -m experiments.render_paper_figures --only F4 F7
+
+# Tier-G + three-causal-layer figures (each < 10 s, no retraining)
+python -m experiments.render_paper_figures.F9_sleep_four_domain
+python -m experiments.render_paper_figures.F11_color_primaries
+python -m experiments.render_paper_figures.F12_number_decimal
+python -m experiments.render_paper_figures.F13_number_extrapolate
+python -m experiments.render_paper_figures.F14_color_holdout
+python -m experiments.render_paper_figures.F15_phoneme_transfer
 ```
 
 ### Regenerating the shipped ANS encoder
@@ -181,6 +255,52 @@ scratch:
 ```bash
 python -m experiments.train_ans --epochs 30 --out outputs/ans_encoder
 ```
+
+## PCM as a falsifiable cognitive-science testbed
+
+Beyond the empirical four-domain study, PCM provides a
+methodologically explicit ablation protocol for asking "does
+representational primitive *Y* require external priors, or
+does it fall out of generic learning?" — see
+[`docs/SHORT_REPORT_EN.md`](./docs/SHORT_REPORT_EN.md) for the
+2,700-word write-up targeting *Trends in Cognitive Sciences*
+Forum / *Cognitive Science* short reports.
+
+The protocol is the **A / B / C / D / B+C+D** five-condition
+template, mapped onto three causal layers from the human
+trichromacy literature (Stockman & Sharpe 2000; Jacobs 2009;
+Conway et al. 2007):
+
+- **A** baseline: random centroids, uniform sampling, no auxiliary
+  head. Symmetric task only.
+- **B** biological prior: e.g. an LMS-cone-like centroid layout
+  for colour, decimal-cone centroids for numbers, articulator
+  cones for phonemes.
+- **C** ecological statistics: non-uniform sampling boosting
+  task-relevant input distributions.
+- **D** task-driven asymmetry: an auxiliary head that singles out
+  a small subset of inputs as behaviourally relevant
+  (ripe-fruit head for colour, last-digit head for numbers,
+  minimal-pair head for phonemes).
+- **B+C+D**: all three layers stacked.
+
+Across colour (§6.7 / §6.8), number (§7 / §7.4 / §7.5), and
+phoneme (§6.9), the protocol consistently:
+
+1. **Refutes** spontaneous emergence of human-perceptual
+   primitives under symmetric tasks (RGB / RYB hits exactly
+   equal the strict-equidistant rate; 0/24 RYB hits in 24 colour
+   seeds; spike₁₀ ≈ 0.001 in 5 number seeds).
+2. **Supports** prior-driven emergence: BCD reaches red-wedge
+   1.00 on colour, spike₁₀ +0.67 on number, V/M/P transfer
+   0.97 / 0.77 / 0.71 on phoneme.
+3. **Predicts** which layer dominates by **task symmetry**:
+   cyclic / translational tasks need D (colour, number);
+   orthogonal-categorical tasks let B alone do the job
+   (phoneme).
+4. **Maps** clean architectural ceilings: input-side
+   (length-OOD-100 = chance + 1.1 pp) and output-side
+   (hue-5 holdout = 25/25 strictly 0.000).
 
 ## What makes PCM different from prior work
 
