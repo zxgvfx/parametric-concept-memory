@@ -448,6 +448,69 @@ on the gate (≈0.1 was sufficient on V3). Either is structurally
 equivalent to the human habit of "stop using a tool the moment
 it stops being useful".
 
+---
+
+## V3 Cross-Domain — RPE is a universal lever (with one caveat)
+
+After RPE-only saturated `mixed_OOD` to 1.000 on the §7.5-space
+grid, we asked the obvious question: **does RPE generalise to
+PCM's other three domains where the answer also depends only on
+a displacement?** `experiments/rpe_cross_domain.py` defines a
+minimal 5-seed × 20-epoch protocol that compares two heads on
+each domain:
+
+* **concat**: `Linear(2 × embed_dim) → ReLU → ... → n_classes`
+  — the v1 archetype that produces the §7.5-space ceiling.
+* **rpe**: `Linear(embed_dim) → ReLU → ... → n_classes` keyed on
+  `pcm.dual_channel.RelativePositionEmbedding(ranges, embed_dim)`.
+
+| domain | task | concat OOD | RPE OOD | gap |
+| --- | --- | --- | --- | --- |
+| **space** (5×5 / 7×7 mixed_OOD) | direction | 0.000 | **1.000 ± 0.000** | +100 pp |
+| **color** (12-cyclic, holdout hue) | (b−a) mod 12 | 0.000 | **1.000 ± 0.000** | +100 pp |
+| **phoneme** (V/M/P 3-axis discrete) | joint Δ class | 0.003 | **0.965 ± 0.020** | +96 pp |
+| **number** (1-d, \|Δ\| ≤ 29) | b−a class | 0.013 | 0.764 ± 0.009 | +75 pp |
+
+Three observations:
+
+1. **RPE is a universal architectural lever.** Across four
+   structurally distinct domains (2-D lattice, 12-hue cyclic
+   group, 3-axis discrete features, 1-D ordinal), the same API
+   gives a 75 – 100 pp improvement on the matching OOD split.
+   The only feature each setup needs is a finite range of
+   integer displacements; everything else (cyclic vs linear,
+   1-D vs k-D) is absorbed by the `ranges` argument.
+
+2. **The concat baseline collapses to memorisation in every
+   domain.** train_acc = 1.000 alongside in_range ≈ 0 (well
+   below chance 1/n_classes) is not just S6 number's signature;
+   it is the v1-archetype signature *across all four domains*
+   when the test set's exact pair has not been seen. PCM v1
+   heads are doing pair-fingerprint memorisation, not
+   compositional learning, on every pair-input task.
+
+3. **Number's 0.764 is not failure — it is a coverage limit.**
+   The `(N_train=20, N_total=30)` setup contains pairs with
+   `|b − a|` up to 29 in the test set but only up to 19 in the
+   train set. RPE-as-lookup cannot extrapolate beyond the
+   displacements it saw during training; the 76.4 % outer_OOD
+   accuracy matches the fraction of test pairs with `|Δ| ≤ 19`.
+   To handle length-OOD beyond train range, the lookup table
+   needs to be replaced by a **functional** RPE (sinusoidal,
+   RoPE, ALiBi). This is a clean follow-up direction and a
+   precise repeat of S6's vector-analogy failure on number from
+   F40.
+
+Implication for PCM v2 and the broader concept-emergence
+literature: if a task's answer depends on a relative quantity
+(displacement, hue rotation, feature delta, semantic offset),
+adding an RPE table to the head removes the "head-side coverage"
+ceiling that `concat → MLP fc1` has by default. PCM's six prior
+domain studies all live in this bucket; PCM v3 should make RPE a
+default option on every pair-input head and reserve `concat`
+heads for tasks where the answer genuinely depends on absolute
+identity (which is rarer than v1 assumed).
+
 **Three structural lessons** from the chain:
 
 1. The `mixed_OOD = 0.000` ceiling is **not** a bundle-level
@@ -499,6 +562,11 @@ the dual-channel pair when the task is intrinsically pair-input.
 | V3 D4 oracle-attr | `experiments/space_v3_diagnostics.py --diag d4` | `outputs/v3_d4/summary.json` |
 | **V3 RPE-only** | `experiments/space_rpe_poc.py --variant rpe_only` | `outputs/v3_rpe_only/summary.json` (**mixed_OOD = 1.000**) |
 | V3 RPE + attn | `experiments/space_rpe_poc.py --variant rpe_plus_attn` | `outputs/v3_rpe_plus_attn/summary.json` |
+| V3 A1 schedule | `space_rpe_poc.py --gate-mode schedule` | `outputs/v3_rpe_attn_schedule/summary.json` (mixed_OOD = 1.000, λ_final = 0.000) |
+| V3 A2 learned gate | `space_rpe_poc.py --gate-mode learned` | `outputs/v3_rpe_attn_learned/summary.json` (mixed_OOD = 0.720, λ_final = 0.982 — gate stuck) |
+| V3 A2+ reward α=0.5 | `space_rpe_poc.py --gate-mode learned --reward-alpha 0.5` | `outputs/v3_a2plus_a05/summary.json` (mixed_OOD = 0.900, λ stuck) |
+| V3 A2+ L1 β=0.1 | `space_rpe_poc.py --gate-mode learned --gate-l1-beta 0.1` | `outputs/v3_a2_l1only/summary.json` (**mixed_OOD = 1.000, λ = 0.002**) |
+| **V3 cross-domain** | `experiments/rpe_cross_domain.py --domain {space,color,phoneme,number}` | `outputs/rpe_*` (RPE +75 – 100 pp on every domain) |
 
 ---
 
