@@ -1,9 +1,9 @@
-# PCM 2026 Short Report — From v1 Baselines to Universal Operators
+# PCM 2026 Short Report — From v1 Baselines to Cross-Modality Reality
 
-**Status**: project-level synthesis, May 2026. Covers F40 → F62,
+**Status**: project-level synthesis, May 2026. Covers F40 → F63,
 the full arc from "literature-driven causal experiments" to
-"physics-as-procedural-cook + statistical-attractor heads + the
-universal-operator hypothesis — same concept, many muscles".
+"universal operators are real but partial — DNA and Python
+share some sequence-prediction structure, not all of it".
 
 This report is the cohesive narrative version of:
 
@@ -484,13 +484,114 @@ output JSON in ``outputs/f62_full2/summary.json``. Walltime
 
 ---
 
+## 3.8 F63c — Cross-modality DNA + Python: real, partial, falsifiable
+
+The F62 review (paraphrased): *"Math, physics, chemistry transfer
+because you constructed them to be ℤ_N. The real test is biology
+vs code — domains nobody designed to be isomorphic. Does the
+universal operator survive that?"*
+
+F63c is the falsifiable answer. Two genuinely unrelated sequence
+modalities:
+
+* **DNA** — synthetic 4-letter Markov chain with biological-ish
+  dinucleotide transition matrix (CpG depletion, AT/GC bias).
+* **Code** — Python token-type sequences extracted from this
+  repo's ``.py`` files via ``tokenize``, mapped to 8 classes.
+
+A 17K-parameter causal Transformer with per-modality embedding
+and head, and a backbone that can be either shared or separate.
+Four conditions × five falsifiable invariants:
+
+| invariant | criterion | F63 result | status |
+|---|---|---|---|
+| V1 | shared training beats uniform by ≥ 22% | DNA 2.98/4 (25%), Code 2.37/8 (70%) | PASS |
+| V2 | sharing has no penalty | DNA 1.00×, Code 1.01× | PASS |
+| **V3a** | transfer is meaningful (≤ 1.50× from-scratch) | **1.35×** | PASS |
+| **V3b** | transfer is *not* a full substitute (≥ 1.05× from-scratch) | **1.35×** | PASS |
+| V4 | shuffled-position negative ≥ 1.30× honest transfer | **1.53×** | PASS |
+
+The most important entries are **V3a + V3b together**. F62
+shipped a single-sided V3 ("transfer ≥ 0.90"), which was easy
+to interpret but only made sense for hand-isomorphic tasks. For
+real cross-modality we need to test both directions:
+
+* V3a says transfer must do something — the DNA-trained backbone
+  reduced Code perplexity from 8.6 (random init) to 3.17 with
+  only emb+head trained (a 64% reduction in pure transfer mode).
+* V3b says transfer must *not* be free — if a frozen DNA-trained
+  backbone matched a from-scratch Code backbone, we would have
+  to claim two different sequence modalities have *no*
+  modality-specific structure, which is implausible.
+
+V3a 1.35× and V3b 1.35× simultaneously gives us the honest
+result:
+
+```
+Code perplexity ladder
+   ↑
+8.6  random init (no model)
+8.0  uniform baseline
+4.86 shuffled-position negative control
+3.17 ▲ HONEST CROSS-MODALITY TRANSFER (DNA-trained backbone)
+2.34 from-scratch (Code-trained backbone)
+   ↓
+```
+
+The 64% gap between random init (8.6) and honest transfer (3.17)
+is the **architectural** universal-operator effect — sequence-
+prediction patterns generalise across modalities. The 35% gap
+between honest transfer (3.17) and from-scratch (2.34) is the
+**modality-specific** effect — Python's grammar (parens,
+indentation, statement boundaries) is different from DNA's
+Markov chain in ways the architecture cannot magically erase.
+
+### What F63 says about the AGI claim
+
+The reviewer (元宝) framed F63 as "if biology and code transfer
+too, you've touched the bottom logic of AGI". F63's answer:
+
+* **Yes**, real cross-modality transfer happens at zero
+  modality-specific training (V3a 1.35×, V4 negative control
+  1.53× confirms the signal is structural).
+* **No**, transfer is partial (V3b 1.35×) — the architecture
+  helps but does not replace dedicated modality training.
+* **Mostly no**, the "bottom logic of AGI" claim implies a
+  *complete* substrate. F63 falsifies that in the small-model
+  regime. The trillion-parameter unified scientific FMs work
+  by *combining* universal architectural pieces with modality-
+  specific capacity, not by discovering one operator that does
+  everything.
+
+PCM's contribution stays the same and gets sharper: the
+architectural piece **is** the universal operator (F62 + F63c
+V3a). The decoder-side variability **is** the modality muscle
+(V3b). The architecture lets us reason about which is which —
+and F63's two-sided V3 is the falsifiable test for *that*
+distinction.
+
+Reproducibility: ``experiments/cross_modality_dna_code.py``;
+output JSON in ``outputs/f63_full2/summary.json``. Walltime
+~110 s on a single GPU. Full design + 2026 literature contrast
++ honest-bounds discussion in
+``docs/PCM_CROSS_MODALITY_F63.md``.
+
+---
+
 ## 4. Open follow-ups
 
 These are the natural next steps. None blocks publication of
-F40 → F62 as a short report; all are concrete enough that any
+F40 → F63 as a short report; all are concrete enough that any
 of them could be the next milestone if pursued.
 
-1. **F62b–f — universal operator stress tests.** F62 succeeded
+1. **F63d–g — cross-modality follow-ups.** F63c worked on
+   DNA + Python; open: larger real-Python corpus (saturation
+   test), real DNA from GRCh38 chromosome 22 (replace synthetic
+   Markov), other modality pairs (music + language, financial
+   ticks + language), per-component analysis to identify which
+   layers / heads carry the shared structure. Listed in §7 of
+   ``docs/PCM_CROSS_MODALITY_F63.md``.
+2. **F62b–f — universal operator stress tests.** F62 succeeded
    on cyclic ℤ_N. Open: non-abelian groups (D_n, S_n), continuous
    Lie groups (RoPE-style), empirically natural disciplines
    (Hooke / Coulomb / Newton on shared 1/r² template), operator
@@ -556,6 +657,7 @@ of them could be the next milestone if pursued.
 * `experiments/three_body_poc.py` — F60 cook applicability boundary
 * `experiments/three_body_attractor_poc.py` — F61 attractor A1–A4
 * `experiments/cross_discipline_operator.py` — F62 universal operator U1–U5
+* `experiments/cross_modality_dna_code.py` — F63c DNA+Code cross-modality V1–V4
 
 ### Tests (169 / 169 passing)
 * `tests/test_dual_channel.py` (24 cases — DC1–DC6)
@@ -577,6 +679,7 @@ of them could be the next milestone if pursued.
 * `docs/PCM_V4_PHYSICS_COOK_DESIGN.md` — v4 design
 * `docs/PCM_V5_ATTRACTOR_DESIGN.md` — v5 design + cognitive grounding
 * `docs/PCM_UNIVERSAL_OPERATOR_F62.md` — F62 design + 2026 lit + cognitive grounding
+* `docs/PCM_CROSS_MODALITY_F63.md` — F63c cross-modality + honest AGI-claim bounds
 * `docs/PCM_NEUROMORPHIC_PROFILE.md` — F58 hardware spec sheet
 * `docs/SHORT_REPORT_2026_S1_S6.md` — F40–F48 short report
 * `docs/SHORT_REPORT_2026_FULL.md` — this document
@@ -603,10 +706,16 @@ of them could be the next milestone if pursued.
   math transfers to physics @ acc 0.996 with op frozen; permuted
   control fails to chance (0.051); independent-discipline RPEs
   Procrustes-align at 1.00 vs random-baseline 0.63
+* `F63c` cross-modality DNA + Python — DNA-trained Transformer
+  backbone reduces Python perplexity from 8.6 to 3.17 (64% gain)
+  with only emb+head trained; from-scratch Python is 2.34 (35%
+  better still); shuffled negative control 4.86. Universal-
+  operator hypothesis confirmed for the *architectural* part,
+  falsified for the *complete-substitute* claim.
 
 ---
 
 *Maintained as the canonical project-level summary. Update when
-each new milestone (F63+) ships. Numbers are reproducible from
+each new milestone (F64+) ships. Numbers are reproducible from
 the cited output JSONs; CLI commands are copy-pasteable from the
 docstrings of each experiment module.*
