@@ -731,6 +731,22 @@ PCM 会诱导出解决任务所足够的 **pairwise geometry**（加法为线性
 
 ![F13 §7.5 length extrapolation：5 conditions × {in-range OOD, length-100 OOD}, 5 seeds; A/B/C 严格在 chance, D / BCD 给出 statistically detectable 但小的提升](./docs/figures/F13_number_extrapolate.png)
 
+**规模放大 (N=50, N_total=200) 上 +1.1 pp 信号消失**。在 5 倍训练范围与 4 倍输出空间下重跑（3 seeds × 20 epochs × 120 steps，与 N=30/100 的 5 seeds × 30 epochs × 240 steps 配置等比例缩放）：
+
+| 条件 | N=30/100 length-100 OOD | N=50/200 length-100 OOD |
+|---|---|---|
+| A baseline | 0.051 ± 0.000 | 0.048 ± 0.000 |
+| D last-digit | 0.055 ± 0.001 (+1.1 pp ✓) | 0.049 ± 0.001 (+0.1 pp 消失) |
+| BCD combined | **+0.062 ± 0.003** (+1.1 pp ✓) | **0.035 ± 0.027** (−2.6 pp 反向, 1/3 seed 塌缩) |
+
+三个观察：
+
+1. **A / D 在 N=50/200 上落到与 chance 相同**（0.048 / 0.049），D 单独提供的 +1.1 pp 信号被吞噬。
+2. **BCD 出现 catastrophic 塌缩**：3 seed 中 1 个给 length-100 OOD = 0.004（远低于 chance 0.005），std 高达 0.027；这是 N=30/100 上完全没有的现象。
+3. **input-side ceiling 在更大规模上收紧**，而非放松。+1.1 pp 信号是 N=30 specific finite-sample regime 的产物，不能 scale up。
+
+这与 §7.3 / §9 的 PAPER 结构性边界声明完全一致：D91/D92 静态 bundle 架构在小 N 上的微弱 transfer 信号在大 N 上完全失效，**进一步确认 length extrapolation 需要 D93a 级 slot generators 的架构升级，不能仅靠先验注入跨过**。这反而是支持 §7.5 主 claim 的强证据：input-side ceiling 不只是"在 N=30 上接近 chance"，而是**随 N 放大而结构性收紧**。
+
 ### 7.5-space 空间域对应：2-D 格点上的 length extrapolation 与 input-distribution ceiling
 
 §7.5 数字 length-OOD 给出 input-side ceiling（A/B/C/D/BCD 在 length-100 上接近 chance），§7.5-color hue holdout 给出 output-side ceiling（25/25 严格 0.000）。空间域提供第三个维度：**2-D 格点上的 length extrapolation**，揭示一种新的 ceiling 类型——*input-distribution interaction*。

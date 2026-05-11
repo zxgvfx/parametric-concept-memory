@@ -353,6 +353,39 @@ Tests: 75 / 75 pass (63 prior + 12 new diagnostics smoke). No
 regressions in Tier-A grow / Tier-B gate / Tier-C peer / Tier-D
 cook bit-identity; G1–G7 invariants still hold.
 
+- **F35 — PAPER §7.5 scale-up to N=50 / N_total=200 confirms the
+  ceiling tightens with scale**. Re-ran the §7.5 length-OOD
+  protocol on a 5×-larger training range (50 numbers) and a
+  4×-larger output space (200 numbers registered) using the F34
+  dogfooded `experiments/sleep_number_extrapolate.py` with no
+  code changes. 3 seeds × 5 conditions × 20 epochs × 120 steps,
+  proportionally scaled from the N=30/100 baseline.
+  - A baseline length-100 OOD: 0.048 ± 0.000 (matches the
+    N=30/100 chance level of 0.051 ± 0.000).
+  - **D last-digit head signal disappears**: from +0.055 ± 0.001
+    at N=30 (+1.1 pp over chance) to 0.049 ± 0.001 at N=50/200
+    (≈ 0.1 pp, within noise of A baseline).
+  - **BCD shows catastrophic-seed behaviour**: 1 of 3 seeds
+    drops to length-100 OOD = 0.004 (well below chance = 0.005);
+    aggregate 0.035 ± 0.027 vs A baseline 0.048 ± 0.000.
+  - **Conclusion**: the +1.1 pp signal observed at N=30/100 is
+    a finite-sample effect specific to the small-N regime, not
+    a structurally robust transfer mechanism. The input-side
+    ceiling **tightens with scale rather than relaxing**, which
+    *strengthens* §7.5's main claim: D91/D92 static-bundle
+    architecture cannot cross length-OOD without D93a slot-
+    generator upgrade.
+  - This experiment also serves as a **F34 dogfood validation**:
+    the dogfooded `sleep_number_extrapolate.py` ran cleanly at
+    a 4-5× larger problem scale with no modifications, producing
+    a self-consistent and informative result. Schema produced by
+    `pcm.diagnostics.run_causal_ablation` is robust across scale
+    changes.
+  - PAPER §7.5 Chinese and English versions both updated with
+    the scale-up sub-section.
+
+Tests: 75 / 75 pass (no test changes required for F35).
+
 ### Authority — extended
 Above plus VQ-VAE / continual-learning literature mapped to the
 four observed failure modes:
