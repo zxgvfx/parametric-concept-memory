@@ -19,8 +19,17 @@ Public API::
     ContextualizedConcept              — ephemeral collapse handle
     config                              — capacity / grow / gate defaults
 """
-from . import config, diagnostics, dna_ops, gate, graph_eval, peer, sleep
+from . import (
+    config, coref, diagnostics, dna_ops, episodic, gate, graph_eval,
+    peer, sleep,
+)
 from .concept_graph import ConceptGraph, ConceptNode
+from .episodic import (
+    EpisodeRecord,
+    EpisodicBuffer,
+    LongTermEpisodicTrace,
+    consolidate_to_concept_graph,
+)
 from .graph_eval import (
     PARAMETRIC_KIND,
     GraphEvaluator,
@@ -53,4 +62,12 @@ __all__ = [
     "graph_eval",
     "peer",
     "sleep",
+    # F75 — episodic memory
+    "episodic",
+    "EpisodeRecord",
+    "EpisodicBuffer",
+    "LongTermEpisodicTrace",
+    "consolidate_to_concept_graph",
+    # F76 — coreference resolution
+    "coref",
 ]

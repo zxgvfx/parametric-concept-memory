@@ -23,6 +23,12 @@ outputs/**
 !outputs/ans_encoder/eval_report.json
 !outputs/.gitkeep
 
+# Large external corpora downloaded for experiments (F63e DNA etc.)
+data/*.fa
+data/*.fa.gz
+data/*.fasta
+data/*.fasta.gz
+
 # Editor / IDE
 .vscode/
 .idea/
