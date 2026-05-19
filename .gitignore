@@ -29,6 +29,10 @@ data/*.fa.gz
 data/*.fasta
 data/*.fasta.gz
 
+# Commit-message scratch files (used to pass multi-line msgs via -F)
+.commit_msg.tmp
+.commit_msg*.tmp
+
 # Editor / IDE
 .vscode/
 .idea/
