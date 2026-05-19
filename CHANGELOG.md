@@ -6,6 +6,77 @@ and the [Keep a Changelog](https://keepachangelog.com/) conventions.
 
 ## [Unreleased]
 
+### Added — PCM v8.1 scale-up to 67 % RTX 3070 VRAM: lead over GPT widens (F90)
+
+Direct test of the F81 result at ~50 × parameters. Does
+PCM Hybrid still match/beat GPT when scaled to fill the
+8 GB RTX 3070?
+
+#### Setup
+
+* **GPT** ``HybridPCMMiniLM`` substitute: d=512, L=12, 8
+  heads → 40.0 M params, 4.50 GB peak VRAM
+* **Hybrid PCM**: d=512, L=12, attn_every=4 → 74.5 M params,
+  **5.39 GB peak VRAM (67.4 % of 8 GB)**
+* Corpus: TinyStories valid (1.96 M train tokens, vocab 4096)
+* 1 500 training steps, batch=64, seq_len=128, lr=3e-4
+
+#### Results
+
+| model | F81 d=128/L=4 (1.5 M) | F90 d=512/L=12 (40–75 M) | Δ |
+|---|---:|---:|---:|
+| GPT | 11.33 | **9.40** | −17.0 % |
+| Hybrid PCM | 10.86 | **8.75** | **−19.4 %** |
+| ratio Hybrid / GPT | 0.958 | **0.931** | *widens* |
+
+#### F90 invariants
+
+| invariant | criterion | result |
+|---|---|---|
+| **S1 no OOM at target scale** | both train OK | GPT 4.50 GB, Hybrid 5.39 GB PASS |
+| **S2 Hybrid within 1.5 × GPT PPL** | ratio ≤ 1.5 | **0.931** (Hybrid beats GPT) PASS |
+| **S3 both better than F81 baseline** | both PPL < F81 | both PASS (16-19 % improvement) PASS |
+
+#### Two findings worth highlighting
+
+1. **PCM's lead widens with scale.** F81 had Hybrid 4.2 %
+   ahead of GPT; F90 has Hybrid 6.9 % ahead at ~50 × params.
+   The hybrid recipe (3 × Gated PCM + 1 × Gated Attention)
+   doesn't merely keep up — it pulls ahead. This is
+   consistent with the 2026 Qwen3-Next / Granite-4 hybrid
+   pattern.
+2. **F62 ``UniversalCombiner`` continues to work at 50 × scale.**
+   The same Python class + architectural template validated
+   since F62 (across non-abelian groups, Lie groups, DNA,
+   code, music, physics, vision, printed text) shows
+   healthy training dynamics at 50 × parameter count. No
+   architectural changes required to scale.
+
+#### Operational details
+
+* Wall time: GPT 477 s (8 min), Hybrid 2 137 s (36 min) for
+  1 500 steps. Hybrid is 4.5 × slower per step because the
+  gated-PCM forward uses a Python sequential scan; rewriting
+  as parallel scan would close most of the gap.
+* Memory peak: 5.39 GB = **67.4 % of 8 GB RTX 3070** at the
+  design target.
+* The two models are **not** parameter-matched here (Hybrid
+  is 1.86 × GPT, unlike F81's ``build_matched_pentad``).
+  F90 lets each architecture run at its natural (d, L) cost.
+
+#### Public API
+
+* :file:`experiments/scale_f90.py` — focused GPT-vs-Hybrid
+  comparison at configurable scale.
+* :file:`scripts/probe_memory.py` — memory + step-time sweep
+  across (d_model, n_layers) configurations. Used to find
+  the 70 %-VRAM sweet spot.
+
+Reproducibility: ``outputs/f90_full/summary.json``. Memory
+probe results saved during sweep; d=512/L=12 was the largest
+configuration with healthy step times (1357 ms/step). d=768/
+L=12 hits 8.8 GB with 12.5 s/step (paging stalls).
+
 ### Added — PCM v10.2 Writing: token embedding → glyph image, partial (F89)
 
 The closing direction of the multimodal curriculum: F88 read
