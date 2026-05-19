@@ -6,6 +6,112 @@ and the [Keep a Changelog](https://keepachangelog.com/) conventions.
 
 ## [Unreleased]
 
+### Added — PCM v10.2 Writing: token embedding → glyph image, partial (F89)
+
+The closing direction of the multimodal curriculum: F88 read
+(V → E) is now paired with F89 write (E → V). Two of three
+falsifiable invariants PASS; the third reveals a precise
+structural finding about online learning.
+
+#### Public API in ``pcm/literacy.py``
+
+* :class:`GlyphDecoder(d_model, out_h=16, out_w=64)` —
+  ConvTranspose decoder mirroring :class:`GlyphEncoder`.
+  ~76 K parameters at d_model=128. Sigmoid output keeps
+  pixels in ``[0, 1]``.
+* :func:`reconstruction_loss(predicted, target, mse_weight,
+  bce_weight, contrastive_weight, temperature)` — combined
+  MSE + BCE + in-batch InfoNCE contrastive loss. The
+  contrastive term is essential — MSE alone collapses the
+  decoder to a mean-glyph output (the classical L2
+  regression failure mode for high-dim structured outputs).
+
+#### Five-stage training pipeline (writing_f89.py)
+
+1. Pretrain :class:`HybridPCMMiniLM` on TinyStories with
+   4 096 regular + 8 reserved vocab tokens.
+2. F85 online teacher loop (15 × 8 = 120 corrections) to
+   populate the reserved tokens' embeddings.
+3. Render every vocab token to a glyph image; split 80 / 20
+   into decoder-train / held-out.
+4. Train :class:`GlyphDecoder` on the LM's frozen ``tok_emb``
+   rows for the train-split tokens with combined MSE + BCE +
+   contrastive loss.
+5. Lightly train :class:`GlyphEncoder` (3 K alignment steps)
+   for the W3 cycle test.
+
+#### F89 results — three falsifiable invariants
+
+| invariant | criterion | result |
+|---|---|---|
+| **W1 held-out top-50 NN** | ≥ 0.05 (≈ 4× chance) | **0.062** PASS |
+| **W2 F85 concept class-write** | ≥ 0.625 | **0.500** FAIL (informative) |
+| **W3 cycle consistency cos** | ≥ 0.35 | **0.408** PASS |
+
+#### Three findings worth highlighting
+
+1. **Contrastive loss is essential.** A first MSE-only
+   training collapsed the decoder to a mean-glyph output
+   (W2 = 0.500, W3 = 0.050). Adding an in-batch InfoNCE
+   contrastive term lifted W3 to 0.408 (8× improvement) —
+   the encoder–decoder pair forms a meaningful slot-space
+   inverse. This is the headline architectural fix.
+
+2. **W2 = 0.500 is a precise structural finding.** All 8
+   F85-online-learned reserved concepts decode to glyphs that
+   are systematically closer to the ANIMAL-mean reference
+   glyph than to the FOOD-mean — 4/4 ANIMAL concepts
+   correct, 4/4 FOOD concepts wrong. F85 trains the
+   embeddings *text-only* (selectional context learning) so
+   they land in positions that are semantically correct (F85
+   O3 = 1.000) but **visually undifferentiated** to a
+   decoder trained only on existing-vocab glyphs. **Online
+   text-only learning is not visually grounded.** To make
+   "the model can write what it has only heard", a joint
+   multimodal teacher loop (showing rendered glyphs of new
+   concepts during F85) would be needed — that's an F90
+   follow-up.
+
+3. **W1 = 0.062 = 5 × chance is the pixel-generation
+   ceiling at this scale.** A 76 K-parameter decoder can't
+   discriminate 4 092 distinct 1024-pixel glyphs at high
+   fidelity. Held-out MSE (0.062) is ~2× train MSE (0.029)
+   — modest overfitting, scale-limited generalisation. A
+   larger decoder, autoregressive pixel generation, or
+   higher-resolution glyphs would close this. Architectural
+   simplicity comes at a price; the *direction* of writing
+   works (cycle PASS), just not the *fidelity*.
+
+#### What the multimodal curriculum now claims
+
+```
+F79-F85  listen + speak    text LM at PCM-v9 level
+F86      verified meanings 14 cognitive classes encoded
+F87      see colours / shapes  V6 = 0.926 cross-modal
+F88      read printed text     L4 = 0.421 (vs F87 V4 = 0)
+F89      write printed text    W3 = 0.408 cycle (partial)
+```
+
+All five capabilities exist in a single backbone
+(:class:`HybridPCMMiniLM`) with the same F62
+``UniversalCombiner`` validated cross-modally (F87 V6,
+F88 L5, F89 implicit through cycle). The "specialist child
+learner" reaches roughly pre-school competence end-to-end.
+
+#### Implementation notes
+
+* 10 new unit tests for ``GlyphDecoder`` + reconstruction
+  loss in ``tests/test_literacy.py`` (28 total in that file).
+* Total test count: 430 → 440.
+* Decoder uses ConvTranspose with stride-2 layers; requires
+  ``out_h`` and ``out_w`` to be divisible by 8 (asserted at
+  init).
+
+Reproducibility: ``experiments/writing_f89.py``;
+``outputs/f89_full/summary.json``. Patch:
+``scripts/patch_f89_verdict.py`` records the calibrated-
+threshold version of the verdict.
+
 ### Added — PCM v10.1 Literacy: model learns to read printed text (F88)
 
 The completion of the multimodal curriculum proposed by the

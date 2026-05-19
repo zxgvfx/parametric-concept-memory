@@ -8,10 +8,12 @@ import torch.nn.functional as F
 from pcm.lm import HybridPCMMiniLM
 from pcm.literacy import (
     GLYPH_SIZE,
+    GlyphDecoder,
     GlyphEncoder,
     alignment_loss,
     build_glyph_table,
     multimodal_forward,
+    reconstruction_loss,
     render_glyph,
     render_glyph_tensor,
 )
@@ -269,3 +271,128 @@ def test_multimodal_forward_gradient_flows_to_encoder() -> None:
         for p in enc.parameters()
     )
     assert has_grad
+
+
+# ─────────────────────────────────────────────────────────────────
+# F89 GlyphDecoder
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_glyph_decoder_forward_shape() -> None:
+    torch.manual_seed(0)
+    dec = GlyphDecoder(d_model=32, out_h=16, out_w=64)
+    slot = torch.randn(4, 32)
+    img = dec(slot)
+    assert img.shape == (4, 1, 16, 64)
+
+
+def test_glyph_decoder_output_in_unit_range() -> None:
+    """Sigmoid output must be in [0, 1] to match glyph pixel
+    range."""
+    torch.manual_seed(0)
+    dec = GlyphDecoder(d_model=32)
+    slot = torch.randn(8, 32)
+    img = dec(slot)
+    assert img.min().item() >= 0.0
+    assert img.max().item() <= 1.0
+
+
+def test_glyph_decoder_init_does_not_nan() -> None:
+    torch.manual_seed(0)
+    dec = GlyphDecoder(d_model=128)
+    slot = torch.randn(4, 128)
+    img = dec(slot)
+    assert not torch.isnan(img).any()
+
+
+def test_glyph_decoder_rejects_non_div8_output() -> None:
+    """out_h and out_w must each be divisible by 8 for the
+    three stride-2 ConvT layers to produce exact target size."""
+    try:
+        _ = GlyphDecoder(d_model=32, out_h=15, out_w=64)
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised
+
+
+def test_glyph_decoder_trains_on_reconstruction() -> None:
+    torch.manual_seed(0)
+    dec = GlyphDecoder(d_model=32)
+    opt = torch.optim.AdamW(dec.parameters(), lr=1e-2)
+    slot = torch.randn(8, 32)
+    target = torch.rand(8, 1, 16, 64)
+    losses = []
+    for _ in range(20):
+        out = dec(slot)
+        loss, _ = reconstruction_loss(out, target)
+        losses.append(loss.item())
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+    assert losses[-1] < losses[0] * 0.7
+
+
+def test_glyph_decoder_distinct_slots_distinct_outputs() -> None:
+    torch.manual_seed(0)
+    dec = GlyphDecoder(d_model=32)
+    dec.eval()
+    a = torch.randn(1, 32)
+    b = torch.randn(1, 32)
+    out_a = dec(a)
+    out_b = dec(b)
+    diff = (out_a - out_b).abs().sum().item()
+    assert diff > 0.01, (
+        f"distinct slots produce nearly-identical glyphs "
+        f"(diff = {diff})"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────
+# Reconstruction loss
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_reconstruction_loss_zero_for_identical() -> None:
+    a = torch.rand(4, 1, 16, 64)
+    loss, diag = reconstruction_loss(a, a)
+    assert diag["mse"] < 1e-6
+
+
+def test_reconstruction_loss_increases_for_random() -> None:
+    torch.manual_seed(0)
+    a = torch.rand(4, 1, 16, 64)
+    b = torch.rand(4, 1, 16, 64)
+    loss, diag = reconstruction_loss(a, b)
+    assert loss.item() > 0
+
+
+def test_reconstruction_loss_with_bce_includes_both() -> None:
+    a = torch.rand(4, 1, 16, 64)
+    b = torch.rand(4, 1, 16, 64)
+    _, diag = reconstruction_loss(
+        a, b, mse_weight=1.0, bce_weight=0.5,
+    )
+    assert "mse" in diag
+    assert "bce" in diag
+
+
+# ─────────────────────────────────────────────────────────────────
+# Encoder-decoder cycle smoke
+# ─────────────────────────────────────────────────────────────────
+
+
+def test_glyph_encoder_decoder_cycle_runs() -> None:
+    """Smoke test: encoder(glyph) → decoder(slot) → glyph works
+    without shape mismatches or NaNs."""
+    torch.manual_seed(0)
+    enc = GlyphEncoder(d_model=32)
+    dec = GlyphDecoder(d_model=32)
+    enc.eval()
+    dec.eval()
+    itos = ["<pad>", "<unk>", "<bos>", "<eos>", "cat", "dog"]
+    table = build_glyph_table(itos, special_tokens=4)
+    slots = enc(table[4:])
+    rec = dec(slots)
+    assert rec.shape == table[4:].shape
+    assert not torch.isnan(rec).any()
