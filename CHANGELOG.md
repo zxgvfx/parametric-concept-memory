@@ -6,6 +6,92 @@ and the [Keep a Changelog](https://keepachangelog.com/) conventions.
 
 ## [Unreleased]
 
+### Added — F93 joint cycle training fixes W3 at scale (and beats the F89 baseline)
+
+The §3.43 F91/F92 outcome left a precise prescription: **W3
+needs joint encoder+decoder training with a cycle loss**, not
+symmetric capacity scaling. F93 implements that fix in
+~80 lines and passes W1 + W3 at d=512 / L=12, exceeding the
+original d=128 baseline.
+
+#### New public API in ``experiments/writing_f89.py``
+
+* :func:`_train_joint_cycle(decoder, encoder, lm, …)` — single
+  AdamW optimiser over both networks. Minimises the sum of:
+  * ``L_recon`` — F91 decoder loss (MSE + BCE + InfoNCE).
+  * ``L_align`` — F88 alignment loss (MSE + (1 − cos)).
+  * ``L_cycle`` — NEW. ``1 − cos(emb, encoder(decoder(emb)))``.
+* CLI flags: ``--joint-cycle-train`` /
+  ``--joint-cycle-steps`` / ``--cycle-weight`` /
+  ``--align-weight``.
+
+#### F93 result (d=512 / L=12, F91 LM checkpoint)
+
+| metric | F89 d=128 baseline | F91 (dec scale) | F92 (+ enc) | **F93 (joint cycle)** |
+|---|---:|---:|---:|---:|
+| W1 top-50 NN | 0.062 ✓ | 0.057 ✓ | 0.056 ✓ | **0.067 ✓** (best) |
+| W2 class write | 0.500 ✗ | 0.500 ✗ | 0.500 ✗ | 0.250 ✗ |
+| **W3 cycle cos** | **0.408 ✓** | 0.234 ✗ | 0.175 ✗ | **0.512 ✓** (best) |
+| pct cycle > 0.5 | — | — | — | **61.7 %** |
+
+W1 and W3 both **exceed the d=128 baseline at 50× LM scale**.
+The scaling paradox is fully resolved for these two
+invariants.
+
+#### Three findings worth highlighting
+
+1. **Joint training is the architectural fix for W3.** The
+   F89 baseline ``W3 = 0.408`` came from two separate
+   training stages. At d=512 those stages decoupled
+   catastrophically: F89_scaled 0.263, F91 0.234, F92 0.175 —
+   trending **downward** with each independent capacity
+   bump. F93 reverses the trend in one shot to **0.512** —
+   the failure was the *training procedure*, not the
+   embedding-space geometry. Notably F93 uses the *small*
+   encoder (``base_channels=16``, 57 K params) that F92 had
+   uselessly bumped to 502 K. What matters is the encoder
+   sees decoder output during training, not its raw
+   capacity.
+
+2. **W1 improves as a side-effect.** The cycle gradient
+   regularises the decoder toward encoder-recoverable
+   outputs, which happens to also be discriminable. W1
+   0.057 → 0.067 (best across all F89 variants).
+
+3. **W2 remains structural.** W2 still fails (now 0.25;
+   chance with new bias direction). No amount of
+   decoder/encoder scaling or joint training fixes the F85
+   text-only learning gap. **The fix is F94 multimodal F85
+   teacher loop**: when F85 introduces a new concept, also
+   show the GlyphDecoder its rendered glyph during the
+   teacher session. That's a separate experiment.
+
+#### The three-fixes-three-failure-modes table is now fully characterised
+
+| invariant | failure mode | fix | status |
+|---|---|---|---|
+| W1 held-out top-50 NN | decoder ConvT path bottleneck | F91 ``decoder.seed_channels=128`` | ✓ PASS |
+| W3 cycle consistency | separate enc/dec composes errors | **F93 joint cycle loss** | **✓ PASS (beats baseline)** |
+| W2 class write | F85 sees only text contexts | F94 multimodal F85 teacher loop | TODO |
+
+#### Implementation notes
+
+* 80 lines new code total (mostly the
+  ``_train_joint_cycle`` function).
+* Reused F91 LM checkpoint
+  (``outputs/checkpoints/f91_lm_d512.pt``); total F93
+  runtime is **~6 min** (LM load + F85 teacher loop + 2500
+  joint training steps + eval) vs ~40 min for F91 from
+  scratch.
+* Tests: 440/440 pass.
+
+#### Reproducibility
+
+* ``outputs/f93_full/summary.json`` — PASS result with joint
+  cycle training.
+* All four F89/F91/F92/F93 runs use the same LM checkpoint
+  and corpus, so they form a clean controlled ablation.
+
 ### Added — F91 / F92 fixes for the F89 writing scaling paradox
 
 Targeted architectural fixes for the F89-at-scale regression

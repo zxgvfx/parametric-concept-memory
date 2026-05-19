@@ -151,6 +151,131 @@ def _pretrain_lm(
     return lm
 
 
+def _train_joint_cycle(
+    *, decoder: GlyphDecoder, encoder: GlyphEncoder,
+    lm: HybridPCMMiniLM, glyph_table: torch.Tensor,
+    train_ids_set: list[int],
+    n_steps: int, batch_size: int, lr: float,
+    log_every: int, device: str,
+    bce_weight: float = 0.5,
+    contrastive_weight: float = 1.0,
+    contrastive_temp: float = 0.05,
+    align_weight: float = 1.0,
+    cycle_weight: float = 1.0,
+    cosine_lr: bool = False,
+) -> list[dict]:
+    """F93 — joint encoder + decoder training with a cycle-
+    consistency loss.
+
+    Diagnosis (from §3.43): training encoder on true glyphs and
+    decoder on true embeddings separately makes the cycle
+    inverse compose two independent errors. Joint training with
+
+        L_cycle = 1 − cos(emb, encoder(decoder(emb)))
+
+    aligns the round-trip in slot space directly.
+
+    Loss layout (sum):
+
+    * ``L_recon`` — MSE + BCE + in-batch InfoNCE on
+      ``decoder(emb) ↔ true_glyph`` (the F91 decoder loss).
+    * ``L_align`` — MSE + (1 − cos) on
+      ``encoder(true_glyph) ↔ emb`` (the F88 alignment loss).
+    * ``L_cycle`` — 1 − cos on
+      ``emb ↔ encoder(decoder(emb))``.
+
+    Both networks update at the same lr; LM ``tok_emb`` is
+    frozen (we only train the two peripheral networks).
+    """
+    decoder.to(device)
+    encoder.to(device)
+    opt = torch.optim.AdamW(
+        list(decoder.parameters())
+        + list(encoder.parameters()),
+        lr=lr, weight_decay=1e-4,
+    )
+    scheduler = None
+    if cosine_lr:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt, T_max=n_steps, eta_min=lr * 0.1,
+        )
+    rng = torch.Generator(device="cpu").manual_seed(2026)
+    train_idx_tensor = torch.tensor(
+        train_ids_set, dtype=torch.long,
+    )
+    n = len(train_ids_set)
+    log: list[dict] = []
+    t_start = time.time()
+    decoder.train()
+    encoder.train()
+    for step in range(1, n_steps + 1):
+        idx_in_train = torch.randint(
+            0, n, (batch_size,), generator=rng,
+        )
+        sampled_ids = train_idx_tensor[idx_in_train]
+        with torch.no_grad():
+            emb = lm.tok_emb.weight[
+                sampled_ids.to(device)
+            ].detach()
+        true_glyph = glyph_table[sampled_ids].to(device)
+        # Forward
+        pred_glyph = decoder(emb)
+        enc_true = encoder(true_glyph)
+        enc_pred = encoder(pred_glyph)
+        # Losses
+        l_recon, recon_diag = reconstruction_loss(
+            pred_glyph, true_glyph,
+            bce_weight=bce_weight,
+            contrastive_weight=contrastive_weight,
+            temperature=contrastive_temp,
+        )
+        l_align, align_diag = alignment_loss(enc_true, emb)
+        emb_n = F.normalize(emb, dim=-1)
+        enc_pred_n = F.normalize(enc_pred, dim=-1)
+        cycle_cos = (emb_n * enc_pred_n).sum(dim=-1).mean()
+        l_cycle = 1.0 - cycle_cos
+        loss = (
+            l_recon
+            + align_weight * l_align
+            + cycle_weight * l_cycle
+        )
+        opt.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(
+            list(decoder.parameters())
+            + list(encoder.parameters()),
+            1.0,
+        )
+        opt.step()
+        if scheduler is not None:
+            scheduler.step()
+        if step % log_every == 0 or step == n_steps:
+            cur_lr = opt.param_groups[0]["lr"]
+            log.append({
+                "step": step, "loss": float(loss.item()),
+                "lr": cur_lr,
+                "recon_mse": recon_diag["mse"],
+                "recon_bce": recon_diag.get("bce", 0.0),
+                "recon_contrastive": recon_diag.get(
+                    "contrastive", 0.0,
+                ),
+                "align_mse": align_diag["mse"],
+                "align_cosine": align_diag["cosine"],
+                "cycle_cos": float(cycle_cos.item()),
+            })
+            print(
+                f"    [joint] step {step:4d}/{n_steps}  "
+                f"loss={loss.item():.3f}  "
+                f"recon_mse={recon_diag['mse']:.4f}  "
+                f"align_cos={align_diag['cosine']:.3f}  "
+                f"cycle_cos={cycle_cos.item():.3f}  "
+                f"lr={cur_lr:.5f}  "
+                f"wall={time.time()-t_start:.1f}s",
+                flush=True,
+            )
+    return log
+
+
 def _train_decoder(
     *, decoder: GlyphDecoder, lm: HybridPCMMiniLM,
     glyph_table: torch.Tensor, train_ids_set: list[int],
@@ -441,6 +566,21 @@ def main() -> None:
                          "baseline; bump to 64-128 when d_model "
                          "≥ 256 so the encoder cycle inverse can "
                          "keep up with a scaled decoder.")
+    # F93 — joint cycle training (encoder + decoder together)
+    ap.add_argument("--joint-cycle-train", action="store_true",
+                    default=False,
+                    help="F93 fix: replace separate decoder + "
+                         "encoder-align stages with a single "
+                         "joint training that adds a cycle-"
+                         "consistency loss 1 - cos(emb, "
+                         "encoder(decoder(emb))).")
+    ap.add_argument("--joint-cycle-steps", type=int,
+                    default=2000)
+    ap.add_argument("--cycle-weight", type=float, default=1.0,
+                    help="weight on the 1-cos cycle loss term")
+    ap.add_argument("--align-weight", type=float, default=1.0,
+                    help="weight on the encoder alignment loss "
+                         "term inside joint cycle training")
     ap.add_argument("--seed", type=int, default=2026)
     ap.add_argument("--out", type=Path,
                     default=Path("outputs/f89_full"))
@@ -624,24 +764,64 @@ def main() -> None:
         f"(seed_channels={args.decoder_seed_channels})",
         flush=True,
     )
-    decoder_log = _train_decoder(
-        decoder=decoder, lm=lm, glyph_table=glyph_table,
-        train_ids_set=train_ids_set,
-        n_steps=args.decoder_steps,
-        batch_size=args.decoder_batch_size,
-        lr=args.decoder_lr,
-        log_every=args.decoder_log_every,
-        device=DEVICE,
-        bce_weight=args.bce_weight,
-        contrastive_weight=args.contrastive_weight,
-        contrastive_temp=args.contrastive_temp,
-        cosine_lr=args.decoder_cosine_lr,
-    )
+    encoder: GlyphEncoder | None = None
+    if args.joint_cycle_train:
+        # F93 — joint encoder + decoder cycle training.
+        # Replaces the two-stage path (decoder train + light
+        # encoder align) with a single loss combining decoder
+        # reconstruction + encoder alignment + cycle
+        # consistency, in one optimiser pass.
+        print(
+            f"\n    F93 joint cycle training "
+            f"({args.joint_cycle_steps} steps, "
+            f"cycle_weight={args.cycle_weight})",
+            flush=True,
+        )
+        torch.manual_seed(args.seed + 3)
+        encoder = GlyphEncoder(
+            d_model=args.d_model,
+            base_channels=args.encoder_base_channels,
+        )
+        encoder.to(DEVICE)
+        decoder_log = _train_joint_cycle(
+            decoder=decoder, encoder=encoder, lm=lm,
+            glyph_table=glyph_table,
+            train_ids_set=train_ids_set,
+            n_steps=args.joint_cycle_steps,
+            batch_size=args.decoder_batch_size,
+            lr=args.decoder_lr,
+            log_every=args.decoder_log_every,
+            device=DEVICE,
+            bce_weight=args.bce_weight,
+            contrastive_weight=args.contrastive_weight,
+            contrastive_temp=args.contrastive_temp,
+            align_weight=args.align_weight,
+            cycle_weight=args.cycle_weight,
+            cosine_lr=args.decoder_cosine_lr,
+        )
+        print(
+            f"    encoder + decoder trained jointly; encoder "
+            f"params: {count_params(encoder):,}",
+            flush=True,
+        )
+    else:
+        decoder_log = _train_decoder(
+            decoder=decoder, lm=lm, glyph_table=glyph_table,
+            train_ids_set=train_ids_set,
+            n_steps=args.decoder_steps,
+            batch_size=args.decoder_batch_size,
+            lr=args.decoder_lr,
+            log_every=args.decoder_log_every,
+            device=DEVICE,
+            bce_weight=args.bce_weight,
+            contrastive_weight=args.contrastive_weight,
+            contrastive_temp=args.contrastive_temp,
+            cosine_lr=args.decoder_cosine_lr,
+        )
 
-    # Optionally train an encoder (light Stage 2 alignment) for
-    # W3 cycle test.
-    encoder = None
-    if args.align_encoder:
+    # If joint training was used, encoder is already trained;
+    # otherwise optionally train a light encoder for W3 cycle.
+    if encoder is None and args.align_encoder:
         print(
             f"\n    training light GlyphEncoder for W3 cycle "
             f"({args.align_steps} steps)...",
