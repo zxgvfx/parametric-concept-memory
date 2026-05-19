@@ -159,6 +159,7 @@ def _train_decoder(
     bce_weight: float = 0.5,
     contrastive_weight: float = 1.0,
     contrastive_temp: float = 0.05,
+    cosine_lr: bool = False,
 ) -> list[dict]:
     """Train decoder to reconstruct glyphs from
     ``LM.tok_emb`` rows. LM is frozen.
@@ -167,11 +168,21 @@ def _train_decoder(
     contrastive term is essential — without it, MSE alone
     collapses the decoder to a mean-glyph output (visible in
     the original F89 run as W2 ≈ 0.50 and W3 ≈ 0.05).
+
+    F91 fix: optional cosine LR schedule (``cosine_lr=True``)
+    decays lr from ``lr`` to ``lr/10`` over ``n_steps``. The
+    F89 plateau at flat 1e-3 is the symptom the schedule
+    addresses.
     """
     decoder.to(device)
     opt = torch.optim.AdamW(
         decoder.parameters(), lr=lr, weight_decay=1e-4,
     )
+    scheduler = None
+    if cosine_lr:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt, T_max=n_steps, eta_min=lr * 0.1,
+        )
     rng = torch.Generator(device="cpu").manual_seed(2026)
     train_idx_tensor = torch.tensor(
         train_ids_set, dtype=torch.long,
@@ -203,17 +214,20 @@ def _train_decoder(
             decoder.parameters(), 1.0,
         )
         opt.step()
+        if scheduler is not None:
+            scheduler.step()
         if step % log_every == 0 or step == n_steps:
+            cur_lr = opt.param_groups[0]["lr"]
             log.append({
                 "step": step, "train_loss": float(loss.item()),
-                **diag,
+                "lr": cur_lr, **diag,
             })
             cont = diag.get("contrastive", 0.0)
             bce = diag.get("bce", 0.0)
             print(
                 f"    [decoder] step {step:4d}/{n_steps}  "
                 f"mse={diag['mse']:.4f}  bce={bce:.3f}  "
-                f"cont={cont:.3f}  "
+                f"cont={cont:.3f}  lr={cur_lr:.5f}  "
                 f"wall={time.time()-t_start:.1f}s",
                 flush=True,
             )
@@ -391,6 +405,17 @@ def main() -> None:
     ap.add_argument("--decoder-batch-size", type=int, default=128)
     ap.add_argument("--decoder-log-every", type=int, default=500)
     ap.add_argument("--held-out-frac", type=float, default=0.2)
+    ap.add_argument("--decoder-seed-channels", type=int,
+                    default=32,
+                    help="F91 fix: ConvT channel-pyramid width "
+                         "(default 32 = F89 baseline; bump to "
+                         "128/256 when d_model >= 256 so the "
+                         "decoder's rendering path scales with "
+                         "the embedding's information capacity)")
+    ap.add_argument("--decoder-cosine-lr", action="store_true",
+                    default=False,
+                    help="F91 fix: cosine LR schedule over "
+                         "decoder-steps (otherwise flat lr).")
     ap.add_argument("--bce-weight", type=float, default=0.5,
                     help="weight of BCE term in decoder loss")
     ap.add_argument("--contrastive-weight", type=float,
@@ -400,10 +425,22 @@ def main() -> None:
                          "token-discriminable, not mean-collapse)")
     ap.add_argument("--contrastive-temp", type=float,
                     default=0.05)
+    # I/O — checkpoint LM to avoid re-pretraining for decoder
+    # hyperparameter sweeps (F91 fix iteration uses this)
+    ap.add_argument("--lm-checkpoint", type=Path, default=None)
+    ap.add_argument("--save-lm-checkpoint", type=Path,
+                    default=None)
     # F88 encoder (optional, for W3 cycle test)
     ap.add_argument("--align-encoder", action="store_true",
                     default=True)
     ap.add_argument("--align-steps", type=int, default=2000)
+    ap.add_argument("--encoder-base-channels", type=int,
+                    default=16,
+                    help="F92 fix: GlyphEncoder ConvNet channel "
+                         "pyramid start width. Default 16 = F88 "
+                         "baseline; bump to 64-128 when d_model "
+                         "≥ 256 so the encoder cycle inverse can "
+                         "keep up with a scaled decoder.")
     ap.add_argument("--seed", type=int, default=2026)
     ap.add_argument("--out", type=Path,
                     default=Path("outputs/f89_full"))
@@ -457,26 +494,65 @@ def main() -> None:
         flush=True,
     )
 
-    # ─── Step 2: pretrain LM ─────────────────────────────────
-    print(
-        f"\n[2/5] pretraining HybridPCMMiniLM "
-        f"({args.n_pretrain_steps} steps)...",
-        flush=True,
-    )
+    # ─── Step 2: pretrain LM (or load checkpoint) ────────────
     replay = PretrainReplayBuffer(
         capacity=args.batch_size * args.n_replay_steps,
         device=DEVICE,
     )
-    lm = _pretrain_lm(
-        train_ids=train_ids, val_ids=val_ids, vocab=vocab,
-        d_model=args.d_model, n_layers=args.n_layers,
-        n_heads=args.n_heads, n_steps=args.n_pretrain_steps,
-        seq_len=args.seq_len, batch_size=args.batch_size,
-        lr=args.lr, log_every=args.log_every,
-        attn_every=args.attn_every, device=DEVICE,
-        seed=args.seed, replay=replay,
-        n_replay_steps=args.n_replay_steps,
-    )
+    if args.lm_checkpoint is not None and args.lm_checkpoint.exists():
+        print(
+            f"\n[2/5] loading LM checkpoint from "
+            f"{args.lm_checkpoint}...",
+            flush=True,
+        )
+        torch.manual_seed(args.seed)
+        from pcm.lm import HybridPCMMiniLM as _HybridLM
+        lm = _HybridLM(
+            vocab=vocab, d_model=args.d_model,
+            n_layers=args.n_layers, n_heads=args.n_heads,
+            attn_every=args.attn_every,
+        )
+        lm.load_state_dict(
+            torch.load(args.lm_checkpoint, map_location="cpu")
+        )
+        lm.to(DEVICE)
+        # Re-populate replay buffer from a few quick batches so
+        # M3 micro-gradient steps have something to sample.
+        rng = torch.Generator(device="cpu").manual_seed(7777)
+        for _ in range(args.n_replay_steps):
+            xs, ys = _sample_seq_batch(
+                train_ids, seq_len=args.seq_len,
+                batch_size=args.batch_size, rng=rng,
+            )
+            replay.add_batch(xs.to(DEVICE), ys.to(DEVICE))
+    else:
+        print(
+            f"\n[2/5] pretraining HybridPCMMiniLM "
+            f"({args.n_pretrain_steps} steps)...",
+            flush=True,
+        )
+        lm = _pretrain_lm(
+            train_ids=train_ids, val_ids=val_ids, vocab=vocab,
+            d_model=args.d_model, n_layers=args.n_layers,
+            n_heads=args.n_heads, n_steps=args.n_pretrain_steps,
+            seq_len=args.seq_len, batch_size=args.batch_size,
+            lr=args.lr, log_every=args.log_every,
+            attn_every=args.attn_every, device=DEVICE,
+            seed=args.seed, replay=replay,
+            n_replay_steps=args.n_replay_steps,
+        )
+        if args.save_lm_checkpoint is not None:
+            args.save_lm_checkpoint.parent.mkdir(
+                parents=True, exist_ok=True,
+            )
+            torch.save(
+                lm.state_dict(), args.save_lm_checkpoint,
+            )
+            print(
+                f"    saved LM checkpoint to "
+                f"{args.save_lm_checkpoint}",
+                flush=True,
+            )
 
     # ─── Step 3: F85 teacher loop on reserved concepts ───────
     print(
@@ -539,9 +615,13 @@ def main() -> None:
         flush=True,
     )
     torch.manual_seed(args.seed)
-    decoder = GlyphDecoder(d_model=args.d_model)
+    decoder = GlyphDecoder(
+        d_model=args.d_model,
+        seed_channels=args.decoder_seed_channels,
+    )
     print(
-        f"    decoder params: {count_params(decoder):,}",
+        f"    decoder params: {count_params(decoder):,} "
+        f"(seed_channels={args.decoder_seed_channels})",
         flush=True,
     )
     decoder_log = _train_decoder(
@@ -555,6 +635,7 @@ def main() -> None:
         bce_weight=args.bce_weight,
         contrastive_weight=args.contrastive_weight,
         contrastive_temp=args.contrastive_temp,
+        cosine_lr=args.decoder_cosine_lr,
     )
 
     # Optionally train an encoder (light Stage 2 alignment) for
@@ -567,7 +648,10 @@ def main() -> None:
             flush=True,
         )
         torch.manual_seed(args.seed + 3)
-        encoder = GlyphEncoder(d_model=args.d_model)
+        encoder = GlyphEncoder(
+            d_model=args.d_model,
+            base_channels=args.encoder_base_channels,
+        )
         encoder.to(DEVICE)
         opt_e = torch.optim.AdamW(
             encoder.parameters(), lr=1e-3, weight_decay=1e-4,

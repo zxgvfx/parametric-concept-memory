@@ -162,44 +162,54 @@ def build_glyph_table(
 
 
 class GlyphEncoder(nn.Module):
-    """Small ConvNet that maps a ``(1, H, W)`` glyph image to
-    a single slot of dimension ``d_model``.
+    """ConvNet that maps a ``(1, H, W)`` glyph image to a
+    single slot of dimension ``d_model``.
 
     The architecture is more aggressive than
     :class:`pcm.vision.VisualEncoder` because glyph
     discrimination requires resolving fine letter-shape
     differences:
 
-        ``Conv(1 → 16, 3x3) → BN → SiLU``  (full resolution)
-        ``Conv(16 → 32, 3x3, stride 2) → BN → SiLU``
-        ``Conv(32 → 64, 3x3, stride 2) → BN → SiLU``
+        ``Conv(1 → c0, 3x3) → BN → SiLU``  (full resolution)
+        ``Conv(c0 → c0·2, 3x3, stride 2) → BN → SiLU``
+        ``Conv(c0·2 → c0·4, 3x3, stride 2) → BN → SiLU``
         ``AdaptiveAvgPool(1)``
-        ``Linear(64 → d_model)``
+        ``Linear(c0·4 → d_model)``
 
-    For ``size = (16, 64)``, after two stride-2 convs the
-    feature map is ``(64, 4, 16)`` before pooling. ~31 K
-    parameters at d_model=128.
+    ``base_channels=16`` (default) gives ~31 K params at
+    ``d_model=128`` — the F88 baseline. For F92 / scaled
+    settings, bump to 64 or 128 so the encoder's channel-
+    pyramid scales with the decoder (symmetric cycle).
     """
 
     def __init__(
         self, d_model: int = 128, dropout: float = 0.0,
+        base_channels: int = 16,
     ) -> None:
         super().__init__()
+        if base_channels < 4 or base_channels % 4 != 0:
+            raise ValueError(
+                f"base_channels must be ≥4 and divisible by 4 "
+                f"(got {base_channels})"
+            )
         self.d_model = d_model
+        c0 = base_channels
+        c1 = c0 * 2
+        c2 = c0 * 4
         self.features = nn.Sequential(
-            nn.Conv2d(1, 16, kernel_size=3, padding=1),
-            nn.BatchNorm2d(16),
+            nn.Conv2d(1, c0, kernel_size=3, padding=1),
+            nn.BatchNorm2d(c0),
             nn.SiLU(),
-            nn.Conv2d(16, 32, kernel_size=3, padding=1, stride=2),
-            nn.BatchNorm2d(32),
+            nn.Conv2d(c0, c1, kernel_size=3, padding=1, stride=2),
+            nn.BatchNorm2d(c1),
             nn.SiLU(),
-            nn.Conv2d(32, 64, kernel_size=3, padding=1, stride=2),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(c1, c2, kernel_size=3, padding=1, stride=2),
+            nn.BatchNorm2d(c2),
             nn.SiLU(),
             nn.AdaptiveAvgPool2d(1),
         )
         self.dropout = nn.Dropout(dropout)
-        self.proj = nn.Linear(64, d_model)
+        self.proj = nn.Linear(c2, d_model)
         nn.init.normal_(self.proj.weight, std=0.02)
         nn.init.zeros_(self.proj.bias)
 
@@ -217,23 +227,32 @@ class GlyphEncoder(nn.Module):
 
 
 class GlyphDecoder(nn.Module):
-    """Small ConvTranspose decoder that maps a token-embedding
-    slot to a ``(1, H, W)`` glyph image.
+    """ConvTranspose decoder that maps a token-embedding slot
+    to a ``(1, H, W)`` glyph image (F89 writing capability).
 
-    Mirror image of :class:`GlyphEncoder` for the F89 *writing*
-    capability: given a token's embedding, reconstruct what its
-    printed glyph looks like.
+    Architecture for ``GLYPH_SIZE = (16, 64)`` with
+    ``seed_channels = c0``:
 
-    Architecture for ``GLYPH_SIZE = (16, 64)``:
+        ``Linear(d_model, c0·2·8)``  → reshape to ``(c0, 2, 8)``
+        ``ConvT(c0 → c0/2, k=4, s=2) → BN → SiLU``  → ``(c0/2, 4, 16)``
+        ``ConvT(c0/2 → c0/4, k=4, s=2) → BN → SiLU`` → ``(c0/4, 8, 32)``
+        ``ConvT(c0/4 → 1, k=4, s=2) → Sigmoid``      → ``(1, 16, 64)``
 
-        ``Linear(d_model, 32·2·8)``  → reshape to ``(32, 2, 8)``
-        ``ConvT(32 → 16, k=4, s=2) → BN → SiLU``  → ``(16, 4, 16)``
-        ``ConvT(16 →  8, k=4, s=2) → BN → SiLU``  → ``(8, 8, 32)``
-        ``ConvT( 8 →  1, k=4, s=2) → Sigmoid``    → ``(1, 16, 64)``
+    Parameter count is dominated by:
 
-    ~77 K parameters at ``d_model=128`` — about twice the
-    encoder, because expansion is harder than compression. The
-    final ``Sigmoid`` keeps the output in ``[0, 1]`` matching
+    * The ``proj`` linear (``d_model × c0 × 16``).
+    * The first ConvT (``c0 × c0/2 × 16``).
+
+    ``seed_channels=32`` (default) gives ~77 K params at
+    ``d_model=128``. The F89 scaling-paradox finding (3.42)
+    revealed that this is the bottleneck at large ``d_model``:
+    the linear ``proj`` grows but the ConvT channel widths
+    don't, so the model can land embeddings well but cannot
+    render them as distinct pixels. ``seed_channels=128``
+    (~1.2 M params) gives the ConvT path room to scale; F91
+    uses this default at d_model=512.
+
+    The final ``Sigmoid`` keeps output in ``[0, 1]`` matching
     the renderer's pixel range.
     """
 
@@ -241,6 +260,7 @@ class GlyphDecoder(nn.Module):
         self, d_model: int = 128,
         out_h: int = 16, out_w: int = 64,
         dropout: float = 0.0,
+        seed_channels: int = 32,
     ) -> None:
         super().__init__()
         if out_h % 8 != 0 or out_w % 8 != 0:
@@ -248,30 +268,37 @@ class GlyphDecoder(nn.Module):
                 f"out_h and out_w must each be divisible by 8 "
                 f"(got {out_h}, {out_w})"
             )
+        if seed_channels < 8 or seed_channels % 4 != 0:
+            raise ValueError(
+                f"seed_channels must be ≥8 and divisible by 4 "
+                f"(got {seed_channels})"
+            )
         self.d_model = d_model
         self.out_h = out_h
         self.out_w = out_w
         self._seed_h = out_h // 8
         self._seed_w = out_w // 8
-        self._seed_c = 32
+        self._seed_c = seed_channels
+        c0 = seed_channels
+        c1 = max(c0 // 2, 4)
+        c2 = max(c0 // 4, 4)
         self.proj = nn.Linear(
             d_model,
-            self._seed_c * self._seed_h * self._seed_w,
+            c0 * self._seed_h * self._seed_w,
         )
         self.deconv = nn.Sequential(
             nn.ConvTranspose2d(
-                self._seed_c, 16,
-                kernel_size=4, stride=2, padding=1,
+                c0, c1, kernel_size=4, stride=2, padding=1,
             ),
-            nn.BatchNorm2d(16),
+            nn.BatchNorm2d(c1),
             nn.SiLU(),
             nn.ConvTranspose2d(
-                16, 8, kernel_size=4, stride=2, padding=1,
+                c1, c2, kernel_size=4, stride=2, padding=1,
             ),
-            nn.BatchNorm2d(8),
+            nn.BatchNorm2d(c2),
             nn.SiLU(),
             nn.ConvTranspose2d(
-                8, 1, kernel_size=4, stride=2, padding=1,
+                c2, 1, kernel_size=4, stride=2, padding=1,
             ),
             nn.Sigmoid(),
         )

@@ -6,6 +6,92 @@ and the [Keep a Changelog](https://keepachangelog.com/) conventions.
 
 ## [Unreleased]
 
+### Added — F91 / F92 fixes for the F89 writing scaling paradox
+
+Targeted architectural fixes for the F89-at-scale regression
+documented in §3.42. **F91 succeeds for W1** (decoder
+scaling); F92 shows that **encoder scaling does NOT help W3**
+(and slightly hurts), isolating the remaining gap as
+*joint-cycle-training* + *multimodal-teacher-loop* rather
+than capacity scaling.
+
+#### New public API in ``pcm/literacy.py``
+
+* :class:`GlyphDecoder(seed_channels=…)` — controls the ConvT
+  channel pyramid ``c0 → c0/2 → c0/4 → 1``. Default 32 (F89
+  baseline backward-compatible). F91 uses 128 (1.2 M params).
+* :class:`GlyphEncoder(base_channels=…)` — controls the Conv
+  input pyramid ``c0 → 2c0 → 4c0``. Default 16 (F88 baseline).
+  F92 used 64 (502 K params) — verified *not* the right
+  scaling axis (see Finding 2 below).
+* :func:`experiments.writing_f89._train_decoder(cosine_lr=…)`
+  — optional cosine LR schedule over decoder steps.
+
+#### New CLI flags in ``experiments/writing_f89.py``
+
+* ``--decoder-seed-channels INT`` (default 32)
+* ``--encoder-base-channels INT`` (default 16)
+* ``--decoder-cosine-lr`` (boolean; default off)
+* ``--lm-checkpoint PATH`` / ``--save-lm-checkpoint PATH`` —
+  reuse the d=512 LM pretrain (~35 min) across decoder/
+  encoder hyperparameter iterations.
+
+#### F91 / F92 results
+
+All four runs use the same TinyStories pretrain + F85 teacher
+loop. Only the encoder/decoder configuration changes.
+
+| metric | F89 baseline d=128 | F89 d=512 (no fix) | **F91 (decoder scale)** | F92 (+ encoder scale) |
+|---|---:|---:|---:|---:|
+| decoder params | 76 K | 273 K | **1.2 M** | 1.2 M |
+| encoder params | 32 K | 57 K | 57 K | 502 K |
+| W1 top-50 NN | 0.062 ✓ | 0.046 ✗ | **0.057 ✓** | 0.056 ✓ |
+| W2 class write | 0.500 ✗ | 0.375 ✗ | 0.500 ✗ | 0.500 ✗ |
+| W3 cycle cos | 0.408 ✓ | 0.263 ✗ | 0.234 ✗ | **0.175 ✗** |
+
+#### Three findings worth highlighting
+
+1. **F91 recovers W1**: bumping ``decoder.seed_channels``
+   32 → 128 with batch=512 restores ``W1 = 0.057 PASS`` at
+   d_model=512. The §3.42 diagnosis ("decoder ConvT path is
+   the bottleneck") is confirmed.
+
+2. **F92 hurts W3** (0.234 → 0.175). The bigger encoder is
+   *more* expressive, but at W3 evaluation the encoder is
+   fed ``decoder(emb_A)``, which is slightly off-
+   distribution. Bigger encoder amplifies off-distribution
+   noise rather than averaging it out. The architectural
+   lesson: cycle inverse needs **joint training** with a
+   cycle loss, not just symmetric scaling.
+
+3. **W2 systematic bias is unchanged across all four
+   configurations**. Every F85-online concept decodes closer
+   to one of the two class-means with near-deterministic
+   bias direction (F91 / F92 differ in which direction). The
+   F85 text-only online learning genuinely does not transfer
+   to visual writing. The structural fix is a multimodal F85
+   teacher loop that simultaneously feeds rendered glyphs of
+   the new concepts to the decoder.
+
+#### Three orthogonal fixes precisely characterised
+
+After this iteration the remaining gaps map cleanly onto
+distinct architectural changes:
+
+| invariant | failure mode | fix |
+|---|---|---|
+| W1 held-out top-50 NN | decoder ConvT path bottleneck | **F91** seed_channels scaling ✓ |
+| W3 cycle consistency | encoder + decoder trained separately, cycle composes errors | F93+ joint cycle-loss training |
+| W2 class write | F85 online learning sees only text contexts | F94+ multimodal teacher loop |
+
+#### Reproducibility
+
+* ``outputs/f91_full/summary.json`` — F91 PASS result.
+* ``outputs/f92_full/summary.json`` — F92 (encoder scaling
+  doesn't help) negative-result documentation.
+* ``outputs/checkpoints/f91_lm_d512.pt`` — saved 35-min LM
+  pretrain, reusable for future iterations.
+
 ### Documented — F89 at scale: the scaling paradox (writing does NOT scale with LM)
 
 Follow-up to F90: re-ran F89 writing at the same scale that
