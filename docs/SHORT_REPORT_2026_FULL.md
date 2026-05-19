@@ -3419,6 +3419,125 @@ Reproducibility: ``experiments/scale_f90.py``;
 
 ---
 
+## 3.42 F89 at scale — the scaling paradox: language ↑ but writing ↓
+
+After F90 confirmed that PCM v8.1 (Hybrid) **widens** its lead
+over GPT when scaled from 1.5 M → 75 M parameters (gap
+ratio 0.958 → 0.931), the natural follow-up: does F89's
+*writing* capability also improve at the same scale? Re-run
+F89 at d_model=512 / L=12, same architecture and pipeline,
+just bigger.
+
+The answer is empirically **no — at first cut**, and the
+*direction* of the regression is informative.
+
+### Setup
+
+Identical to F89 (Stage 1 pretrain → Stage 2 F85 teacher loop
+→ Stage 3 decoder + encoder alignment) but with the F90 LM
+config: ``HybridPCMMiniLM(d_model=512, n_layers=12,
+n_heads=8, attn_every=4)``. 1 500 pretrain steps gives the
+same PPL ≈ 8.7 as F90.
+
+### F89-at-scale results
+
+| metric | F89 baseline (d=128 / L=4) | **F89-scaled (d=512 / L=12)** | direction |
+|---|---:|---:|---:|
+| LM pretrain val PPL | 10.46 | **8.7** | ↓ better |
+| decoder held-out MSE | 0.029 | **0.019** | ↓ better |
+| decoder params | 76 K | 273 K | ↑ larger |
+| **W1** top-50 NN | 0.062 PASS | **0.046 FAIL** | ↓ worse |
+| **W2** class write | 0.500 FAIL | **0.375 FAIL** | ↓ worse |
+| **W3** cycle cos | 0.408 PASS | **0.263 FAIL** | ↓ worse |
+
+Pretty striking: at 50 × LM scale, the model's **pixel-level
+reconstruction improves** (MSE 0.019 < 0.029) but
+**token-level discrimination collapses** (W1 0.046 < 0.062;
+W3 0.263 < 0.408).
+
+### Why scaling the LM does not help writing (and slightly hurts)
+
+Three plausible mechanisms, in decreasing order of likelihood:
+
+1. **Decoder conv path is the bottleneck.** The current
+   :class:`pcm.literacy.GlyphDecoder` has only its linear
+   ``proj`` layer scaling with ``d_model`` (128 → 512 grew the
+   proj from 66 K → 262 K). The ConvT path stays fixed at
+   ``32 → 16 → 8 → 1`` channels (~11 K params), independent
+   of ``d_model``. At d=512 the model has more room to land
+   the *embedding* but no more room to *render* it as
+   distinct pixels. Result: high-quality reconstruction of a
+   blurry mean-glyph.
+
+2. **Contrastive loss with vocab=4096 / batch=128 is too
+   weak.** In-batch InfoNCE sees only 3 % of vocab as
+   negatives. The contrastive loss saturates around 3.78 at
+   scale (vs 3.47 at d=128). The decoder simply cannot
+   compress 4 092-way discrimination into its narrow ConvT
+   path with this signal density.
+
+3. **Bigger embedding space spreads tokens uniformly.** At
+   d=128 the token-embedding cloud is *compact* (small
+   typical separation, easy to project). At d=512 the cloud
+   is sparser; the decoder must distinguish ~4 K points in
+   a much larger ambient space with the same conv path.
+
+### The honest scientific finding
+
+> *Scaling the language model alone makes writing **worse**,
+> not better. The decoder needs its own scaling — wider
+> ConvT channels and richer contrastive signal — to keep up.
+> "Reading and writing are not symmetric tasks": F88 (read)
+> scales naturally with LM size because the LM body absorbs
+> the cross-modal noise during joint multimodal training; F89
+> (write) requires the **decoder** to do the discrimination
+> work, and a 273 K-parameter decoder can't.*
+
+This is the cleanest empirical statement of the **read–write
+asymmetry** at this scale. F88 V→E joint training works
+because the LM body is huge and adaptive; F89 E→V needs the
+decoder to do the heavy lifting in a much smaller module.
+
+### What would close the scaled-F89 gap
+
+1. **Wider decoder conv path**: add a ``seed_channels``
+   hyper-parameter; bump from 32 to 128–256 (≈ 4–8 × more
+   conv params, still <2 M total).
+2. **Bigger contrastive batch**: use 512+ for the decoder
+   phase, or a MoCo-style memory queue of past-batch features
+   (already standard in CLIP-style multimodal training).
+3. **Decoder LR schedule**: a cosine decay with longer
+   horizon; current AdamW at flat 1e-3 plateaus quickly.
+4. **Joint multimodal teacher loop** (F90+ direction): F85
+   simultaneously shows rendered glyphs of new concepts so
+   the **decoder also gets gradient** on novel concepts —
+   the operational fix for W2.
+
+### What F89-at-scale commits PCM to claiming
+
+* PCM's *reading* direction scales with LM size (F88 → F87
+  and F90 confirm). **Writing does not** — it has its own
+  scaling laws controlled by the decoder's spatial path and
+  contrastive signal strength.
+* The F89 baseline result (d=128 / L=4: W1, W3 PASS) is the
+  current PCM ceiling for cross-modal writing at this
+  decoder configuration. Closing the scaling gap is an
+  active follow-up.
+* The asymmetry between F88 (read) and F89 (write) is a
+  precise architectural finding — not a software bug but a
+  *structural property* of the encode-vs-decode setup. The
+  cross-modal universality of the F62 ``UniversalCombiner``
+  is preserved (it doesn't break in either direction); it's
+  the *peripheral* networks (encoder, decoder) that must be
+  scaled separately.
+
+Reproducibility: ``experiments/writing_f89.py`` (same code,
+just larger CLI args). Outputs:
+``outputs/f89_scaled/summary.json``. The F89 d=128 / L=4
+canonical PASS remains at ``outputs/f89_full/summary.json``.
+
+---
+
 ## 4. Open follow-ups
 
 These are the natural next steps. None blocks publication of

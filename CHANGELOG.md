@@ -6,6 +6,81 @@ and the [Keep a Changelog](https://keepachangelog.com/) conventions.
 
 ## [Unreleased]
 
+### Documented — F89 at scale: the scaling paradox (writing does NOT scale with LM)
+
+Follow-up to F90: re-ran F89 writing at the same scale that
+made F90's PCM Hybrid widen its lead over GPT (d=512, L=12,
+~50× params, ~5.4 GB peak VRAM). Asked whether the writing
+capability also benefits from scale.
+
+Empirical answer: **no, and slightly the reverse**.
+
+| metric | F89 d=128/L=4 | **F89_scaled d=512/L=12** | dir |
+|---|---:|---:|---|
+| LM val PPL | 10.46 | **8.7** | ↓ better |
+| decoder MSE held-out | 0.029 | **0.019** | ↓ better |
+| **W1** top-50 NN | 0.062 PASS | **0.046 FAIL** | ↓ WORSE |
+| **W2** class write | 0.500 FAIL | **0.375 FAIL** | ↓ WORSE |
+| **W3** cycle cos | 0.408 PASS | **0.263 FAIL** | ↓ WORSE |
+
+The LM and decoder reconstruction both *improve* (pixel
+MSE 0.019 < 0.029) but token-level *discrimination collapses*.
+The model produces higher-quality renderings of a more
+blurred mean-glyph.
+
+#### Three mechanisms in decreasing order of likelihood
+
+1. **Decoder conv path is the bottleneck.** ``GlyphDecoder``'s
+   linear ``proj`` scales with ``d_model`` (66 K → 262 K from
+   d=128 to d=512), but the ConvT channel path stays fixed
+   at ``32 → 16 → 8 → 1`` (~11 K params). At scale the
+   decoder gets more room to *land* the embedding but no
+   more room to *render* it as distinct pixels.
+2. **In-batch InfoNCE too weak at vocab=4096.** Batch=128
+   gives only ~3 % vocab as negatives; the contrastive loss
+   saturates around 3.78 (vs 3.47 at d=128). 4 092-way
+   discrimination needs more contrastive signal.
+3. **Sparser embedding cloud at d=512** makes ~4 K tokens
+   distinguishable but requires more decoder spatial capacity.
+
+#### The honest scientific finding
+
+> **Reading and writing are not symmetric tasks.** F88 (V→E)
+> scales naturally with LM size because the LM body absorbs
+> cross-modal noise during joint training; F89 (E→V) needs the
+> *decoder* to do the discrimination, and a 273 K-parameter
+> decoder cannot keep up with 50 × more tokens to disambiguate.
+
+This is a precise architectural property, not a bug. The F62
+``UniversalCombiner`` itself remains valid at scale (F90
+confirmed). What needs separate scaling is the **peripheral
+networks** — encoder and decoder — for cross-modal tasks.
+
+#### What would fix it (F90+ direction)
+
+1. ``seed_channels`` hyper-parameter on ``GlyphDecoder``:
+   bump conv channels from 32 to 128–256 (still <2 M params
+   total). Decouples decoder capacity from ``d_model``.
+2. Larger contrastive batch (512+) or MoCo-style memory queue
+   for richer negatives.
+3. Decoder cosine LR schedule; current flat 1e-3 plateaus
+   quickly.
+4. Joint multimodal teacher loop: F85 simultaneously feeds
+   rendered glyphs of new concepts so the decoder also
+   trains on them (the operational fix for W2).
+
+#### What PCM still claims
+
+* The PCM v10.2 F89 d=128/L=4 baseline (W1, W3 PASS) remains
+  the canonical "writing works at small scale" result.
+* F88 (reading) scales with LM size; F89 (writing) does not,
+  and this is **diagnostic, not pathological** — it isolates
+  which networks need separate scaling rules.
+
+Reproducibility: ``outputs/f89_scaled/summary.json`` (re-run
+with the F90 LM config). Original F89 PASS at
+``outputs/f89_full/summary.json``.
+
 ### Added — PCM v8.1 scale-up to 67 % RTX 3070 VRAM: lead over GPT widens (F90)
 
 Direct test of the F81 result at ~50 × parameters. Does
