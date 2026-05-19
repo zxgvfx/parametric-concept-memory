@@ -475,6 +475,191 @@ class OnlineTeacherSession:
             "m3_loss_after": grad_loss,
         }
 
+    # ── F95: free-form chat correction ─────────────────────────
+
+    def _m3_single_step_chat(
+        self, correction_x: torch.Tensor,
+        correction_y: torch.Tensor,
+    ) -> float:
+        """Variant of :meth:`_m3_single_step` for free-form chat.
+
+        Differences from the F85 single step:
+
+        * Gradient is masked to the *union* of ``tok_emb`` rows
+          that appear in either the context or the target —
+          i.e., we only adjust embeddings of words actually
+          relevant to this turn, not every row in the vocabulary.
+          This is a much weaker constraint than F85's
+          ``novel_ids`` mask but still much stronger than
+          unmasked update.
+        * Replay is used as in F85 to anchor the regular
+          distribution.
+        """
+        self.model.train()
+        replay_x, replay_y = self.replay.sample(self.m3_n_replay)
+        cx = correction_x.to(self.device)
+        cy = correction_y.to(self.device)
+        if cx.dim() == 1:
+            cx = cx.unsqueeze(0)
+            cy = cy.unsqueeze(0)
+        target_len = max(cx.shape[1], replay_x.shape[1])
+
+        def _pad_right(t: torch.Tensor, length: int) -> torch.Tensor:
+            B, L = t.shape
+            if L == length:
+                return t
+            pad = torch.full(
+                (B, length - L), fill_value=self.pad_id,
+                dtype=t.dtype, device=t.device,
+            )
+            return torch.cat([t, pad], dim=1)
+
+        cx_p = _pad_right(cx, target_len)
+        cy_p = _pad_right(cy, target_len)
+        rx_p = _pad_right(replay_x, target_len)
+        ry_p = _pad_right(replay_y, target_len)
+        xs = torch.cat([cx_p, rx_p], dim=0)
+        ys = torch.cat([cy_p, ry_p], dim=0)
+        if hasattr(self.model, "memory_readout"):
+            logits = self.model(
+                xs, use_memory=True, imprint=False,
+            )
+        else:
+            logits = self.model(xs)
+        loss = F.cross_entropy(
+            logits.reshape(-1, logits.shape[-1]),
+            ys.reshape(-1), ignore_index=self.pad_id,
+        )
+        self.opt.zero_grad()
+        loss.backward()
+        with torch.no_grad():
+            grad = self.model.tok_emb.weight.grad
+            if grad is not None:
+                mask = torch.zeros_like(grad)
+                turn_ids = set(cx[0].cpu().tolist()) | set(
+                    cy[0].cpu().tolist()
+                )
+                turn_ids.discard(self.pad_id)
+                for tid in turn_ids:
+                    if 0 <= tid < mask.shape[0]:
+                        mask[tid] = 1.0
+                grad.mul_(mask)
+        torch.nn.utils.clip_grad_norm_(
+            [self.model.tok_emb.weight], 1.0,
+        )
+        self.opt.step()
+        return float(loss.item())
+
+    def receive_chat_turn(
+        self, context_ids: torch.Tensor,
+        target_ids: torch.Tensor,
+        *, run_grad: bool = True,
+        salience_threshold: float | None = None,
+    ) -> dict:
+        """F95 free-form chat correction.
+
+        Unlike :meth:`receive_correction`, no
+        ``novel_concept_id`` is required. The user's response
+        becomes a target completion that the model is nudged
+        toward — *gently*, with replay anchoring the
+        pretraining distribution.
+
+        Args:
+            context_ids: 1-D ``LongTensor`` of token ids the
+                agent saw before generating its response.
+            target_ids: 1-D ``LongTensor`` of the user's
+                actual response (the "correction").
+            run_grad: if ``False``, only the M1 episodic write
+                + surprise measurement happen; no
+                gradient step.
+            salience_threshold: optional override for the
+                session's :attr:`m3_salience_threshold`; the
+                grad step runs iff
+                ``surprise > salience_threshold`` (default
+                = session value).
+
+        Returns a diagnostic dict.
+        """
+        self.t += 1
+        self.counters.n_corrections += 1
+        if context_ids.numel() == 0 or target_ids.numel() == 0:
+            return {
+                "status": "empty_turn",
+                "skipped": True,
+            }
+        thresh = (
+            salience_threshold
+            if salience_threshold is not None
+            else self.m3_salience_threshold
+        )
+
+        # Teacher-forcing surprise = cross-entropy of the
+        # user response given a (context, target[:-1]) prefix
+        # → predicting target. We pad target_ids on the left
+        # by context_ids so the model has full conditioning.
+        with torch.no_grad():
+            ctx = context_ids.to(self.device)
+            tgt = target_ids.to(self.device)
+            if ctx.dim() == 1:
+                ctx = ctx.unsqueeze(0)
+            if tgt.dim() == 1:
+                tgt = tgt.unsqueeze(0)
+            full = torch.cat([ctx, tgt], dim=1)
+            t_in = full[:, :-1]
+            t_out = full[:, 1:]
+            self.model.eval()
+            if hasattr(self.model, "memory_readout"):
+                logits = self.model(
+                    t_in, use_memory=True, imprint=False,
+                )
+            else:
+                logits = self.model(t_in)
+            mask = torch.zeros_like(t_out, dtype=torch.bool)
+            mask[:, ctx.shape[1] - 1:] = True
+            flat_logits = logits.reshape(
+                -1, logits.shape[-1],
+            )
+            flat_targets = t_out.reshape(-1)
+            flat_mask = mask.reshape(-1)
+            if flat_mask.sum() == 0:
+                surprise = 0.0
+            else:
+                loss = F.cross_entropy(
+                    flat_logits[flat_mask],
+                    flat_targets[flat_mask],
+                    ignore_index=self.pad_id,
+                    reduction="mean",
+                )
+                surprise = float(loss.item())
+
+        # M1 episodic write — every chat turn writes.
+        self._m1_imprint(
+            context_ids=t_in[0], target_ids=t_out[0],
+            concept_id=-1,  # no novel-concept tag in chat
+            surprise=surprise,
+        )
+
+        # M3 conditional on surprise (no concept-count gate
+        # for chat — every novel-distribution turn triggers).
+        do_grad = run_grad and surprise > thresh
+        grad_loss: float | None = None
+        if do_grad and len(self.replay) > 0:
+            x_in = full[:, :-1]
+            y_in = full[:, 1:]
+            for _ in range(self.m3_inner_steps):
+                grad_loss = self._m3_single_step_chat(
+                    x_in, y_in,
+                )
+            self.counters.n_m3_grad_steps += 1
+
+        return {
+            "status": "applied",
+            "surprise": surprise,
+            "m1_fired": True,
+            "m3_fired": do_grad,
+            "m3_loss_after": grad_loss,
+        }
+
     # ── Evaluation helpers ─────────────────────────────────────
 
     @torch.no_grad()
