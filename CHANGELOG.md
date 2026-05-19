@@ -6,6 +6,164 @@ and the [Keep a Changelog](https://keepachangelog.com/) conventions.
 
 ## [Unreleased]
 
+### Added — F96 Epistemic agency: hypothesis-test before accept
+
+F95's chat-learning agent was **gullible** — every user
+utterance flowed directly into the M3 micro-gradient and
+the user-fact memory unchallenged. F96 inserts a
+verification stage between the user input and the rest of
+the chat pipeline. The agent now parses each utterance into
+structured :class:`Claim` objects, dispatches them to three
+independent verifiers, and decides ``accept`` / ``pushback``
+/ ``uncertain`` **before** anything is committed to weights
+or memory.
+
+#### New public API
+
+* :mod:`pcm.epistemic` (new module):
+  * :class:`Claim` — dataclass with type
+    (``"arithmetic"``, ``"identity_positive"``,
+    ``"identity_negative"``, ``"self_report"``,
+    ``"generic"``).
+  * :class:`ClaimParser` — regex-based extractor for 6
+    self-report predicates (name / likes / dislikes /
+    is / lives_in / age), positive/negative identity
+    (``"a X is a Y"``), and arithmetic
+    (``X op Y = Z`` symbolic and word forms).
+  * :class:`BeliefStore` — sparse symbolic
+    ``(subject, relation, object, t)`` triple store
+    with :meth:`find_conflict` for explicit
+    contradiction detection (decoupled from neural net;
+    exact and explainable).
+  * :class:`WorldModel` — pre-computed cosine
+    similarity over a curated 60-word, 7-category seed
+    set; ``are_likely_distinct(a, b)`` flags
+    cross-category claims below threshold.
+  * :class:`ArithmeticVerifier` — closed-form Python
+    arithmetic with tolerance for floats.
+  * :class:`ConsistencyVerifier` — combines
+    BeliefStore + WorldModel.
+  * :class:`LMPlausibilityVerifier` — uses LM
+    cross-entropy on the claim sentence as a soft
+    suspicion signal.
+  * :class:`EpistemicAgent` — top-level orchestrator;
+    :meth:`process(user_text, t)` returns an
+    :class:`EpistemicResult` with action
+    (``"accept"`` / ``"pushback"`` / ``"uncertain"`` /
+    ``"no_claim"``), pushback text, and new beliefs.
+
+* :class:`pcm.chat.ChatSession`:
+  * New optional ``epistemic`` argument; when set, the
+    verifier runs on every user turn **before** online
+    learning + fact ingestion.
+  * Pushback short-circuits generation (uses templated
+    reply; **does not** call the M3 teacher; **does
+    not** ingest the user's claim as a fact).
+  * Uncertain prepends a hedge prefix to the LM's
+    natural response.
+
+* CLI: ``python -m pcm.chat --epistemic`` enables the
+  verifier in the interactive REPL. Per-turn UI now
+  shows ``[pushback]`` / ``[hedged]`` /
+  ``[accepted N claim(s)]`` tags.
+
+#### Hybrid pushback policy
+
+* **Hard errors** (arithmetic mismatch, explicit
+  contradiction) → fixed-template pushback. Example
+  output: ``"i don't think 1 + 1 is 3 . i think it is
+  2 ."``
+* **Uncertain plausibility** (LM surprise > threshold,
+  no hard contradiction) → continues to normal LM
+  generation but with a hedge prefix
+  (``"hmm , i am not sure but "``) so the doubt
+  surfaces in the agent's voice.
+
+#### F96 invariants (d=512 / L=12, F91 checkpoint, baseline PPL=8.73)
+
+| invariant | threshold | observed | verdict |
+|---|---|---:|:---:|
+| **E1 arithmetic skepticism** (10 wrong arithmetic → pushback) | ≥ 0.80 | **1.000** (10/10) | ✓ PASS |
+| **E2 arithmetic acceptance** (10 correct arithmetic → accept) | ≥ 0.80 | **1.000** (10/10) | ✓ PASS |
+| **E3 contradiction detection** (10 ``X is Y`` then ``X is not Y`` pairs → pushback) | ≥ 0.60 | **0.900** (9/10) | ✓ PASS |
+| **E4 self-report acceptance** (10 ``my name is X``, ``i live in Y``, etc → accept) | ≥ 0.90 | **1.000** (10/10) | ✓ PASS |
+| **E5 F95 non-regression** (C1+C2+C4 with epistemic ON) | all PASS | C1=0.196, C2=0.800, C4=1.000 | ✓ PASS |
+
+**All five invariants PASS at scale**, on the *same* LM
+state, with C1/C2/C4 numbers identical to F95 alone. The
+verifier is not a tradeoff with conversational fluency.
+
+#### Four findings
+
+1. **Deduction beats statistics when the verifier
+   exists.** Arithmetic E1 + E2 = 20/20 because the
+   verifier is closed-form Python eval, not LM
+   inference. The classical AI-1.0 lesson: when you
+   can write down the rule, use the rule.
+
+2. **A 7-category world model + symbolic belief store
+   handle 9/10 contradictions.** No deep learning in
+   the verification path itself — just cosine
+   similarity over LM-pretrained embeddings treated as
+   a fixed lookup, plus a list of triples.
+
+3. **Epistemic verification does NOT degrade
+   conversational quality.** C1 = 0.196, C2 = 0.800,
+   C4 = 1.000 — identical to F95. The verifier only
+   fires on inputs that *parse* as claims; free-form
+   chat ("hello there") returns ``no_claim`` and flows
+   through F95 unchanged.
+
+4. **Skipping online learning on rejected claims is
+   the right thing.** When ``1+1=3`` is rejected, no
+   M3 step fires and ``UserFactMemory.ingest`` is not
+   called on that utterance. The pretraining
+   distribution stays intact (C4 = 1.000). The
+   agent's beliefs do not get poisoned by adversarial
+   input.
+
+#### Cognitive parallel
+
+The three-verifier architecture is a rudimentary
+scientific method:
+
+* **Deduction** (arithmetic verifier): given premises +
+  rules, derive truth.
+* **Abduction** (LM plausibility): "would I have
+  predicted this observation?" If surprised, scrutinise.
+* **Bookkeeping** (belief store): track explicit
+  assertions; check later ones for consistency.
+
+#### Implementation notes
+
+* ~430 lines in ``pcm/epistemic.py``; ~80 lines of
+  integration in ``pcm/chat.py`` (3 sites:
+  ``ChatSession.__init__``, ``respond_to``, the CLI).
+* ~250 lines in ``experiments/epistemic_f96.py``.
+* No changes to ``pcm/lm.py``, ``pcm/episodic.py``,
+  ``pcm/user_memory.py``, ``pcm/online.py``, or the
+  F62 ``UniversalCombiner``.
+* Tests: 37 new in ``tests/test_epistemic.py``; full
+  regression (517 tests) passes.
+* JSON: ``outputs/f96_full/summary.json``. Runtime
+  ~2 min on RTX 3070.
+
+#### What F96 commits PCM to claiming
+
+* PCM v10.7: the chat-learning agent is **no longer
+  gullible**. It pushes back on arithmetic errors and
+  on direct contradictions. It does not let online
+  learning corrupt its pretraining distribution on
+  rejected claims.
+* The architecture is **modular**: the EpistemicAgent
+  is optional and can be extended with new verifier
+  types (physical laws, geographic facts, …) without
+  touching the conversational core.
+* Epistemic agency is the *missing link* between F95's
+  "trusts everything" online-learning loop and a
+  deployable agent that the user can correct itself
+  against.
+
 ### Added — F95 Live chat-learning agent: PCM talks, listens, remembers, and learns in real time
 
 F40 → F94 built the cognitive primitives one at a time

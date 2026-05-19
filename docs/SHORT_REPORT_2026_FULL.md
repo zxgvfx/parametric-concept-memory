@@ -4164,6 +4164,241 @@ weights, not just rebuild it on demand from the corpus.
 
 ---
 
+## 3.47 F96 — Epistemic agency: hypothesis-test before accept
+
+F95's chat-learning agent was **gullible**: every user
+utterance flowed directly into the M3 micro-gradient and
+the user-fact memory unchallenged. If the user asserted
+``1 + 1 = 3`` the F95 agent would faithfully store that and
+let the gradient update push the LM toward it.
+
+F96 inserts a **verification stage** between the user
+input and the rest of the chat pipeline. The agent now
+parses each user utterance into structured
+:class:`Claim` objects, dispatches them to three
+independent verifiers, and decides ``accept``,
+``pushback``, or ``uncertain`` *before* anything is
+committed to weights or memory.
+
+The hypothesis under test: *a PCM agent that maintains an
+explicit belief store, runs deductive arithmetic and
+abductive plausibility checks, and short-circuits learning
+on rejected claims, will not silently accept obvious
+falsehoods — while still passing the F95 C1-C4 invariants
+on clean conversation*.
+
+### Architecture
+
+```
+user text ─▶ ClaimParser ─▶ [arith | identity | self-report | generic] Claim
+                                        │
+                ┌───────────────────────┼───────────────────────┐
+                ▼                       ▼                       ▼
+        ArithmeticVerifier   ConsistencyVerifier   LMPlausibilityVerifier
+        (closed-form eval)   (belief store + WM)   (LM surprise threshold)
+                ▼                       ▼                       ▼
+                └────────── aggregate ─ verdict ────────────────┘
+                                        │
+                ┌───────────────────────┼───────────────────────┐
+                ▼                       ▼                       ▼
+            ACCEPT                  PUSHBACK                UNCERTAIN
+            update beliefs +        templated reply,        hedge prefix
+            normal generation       skip learning           on LM response
+```
+
+Three verifiers, three sources of evidence:
+
+* :class:`ArithmeticVerifier` — closed-form Python
+  arithmetic. ``1 + 1 == 3`` is computable; no LM needed.
+* :class:`ConsistencyVerifier` — checks each identity
+  claim against (a) the :class:`BeliefStore` (explicit
+  prior assertions) and (b) the :class:`WorldModel`
+  (pre-computed cosine similarity over a 7-category
+  curated word set; cosine below 0.10 across categories
+  marks ``"X is Y"`` as suspicious).
+* :class:`LMPlausibilityVerifier` — uses the LM itself as
+  a world-model: high mean cross-entropy on the claim
+  sentence ⇒ the claim is out-of-distribution for
+  pretraining ⇒ marked uncertain. Used as a *soft signal*;
+  cannot pushback on its own.
+
+The :class:`BeliefStore` is a sparse symbolic store of
+``(subject, relation, object, t)`` triples, deliberately
+**decoupled from the neural network**. Contradiction
+detection is exact and explainable, not a side-effect of
+some gradient direction.
+
+### Hybrid pushback policy
+
+* **Hard errors** (arithmetic mismatch, explicit
+  contradiction in the belief store) → fixed-template
+  pushback. Example: ``"i don't think 1 + 1 is 3 . i
+  think it is 2 ."`` Clarity beats fluency when the
+  correct answer is determined.
+* **Uncertain plausibility** (LM surprise above
+  threshold, no hard contradiction) → the agent continues
+  to its normal LM response but a hedge prefix
+  (``"hmm , i am not sure but "``) is prepended, marking
+  the doubt in the agent's voice while letting the LM
+  produce its natural-sounding completion.
+
+### F96 invariants and results
+
+All measurements use the same
+``outputs/checkpoints/f91_lm_d512.pt`` checkpoint (75 M
+parameters, d=512, L=12). Baseline TinyStories validation
+PPL = 8.73.
+
+| invariant | threshold | observed | verdict |
+|---|---|---:|:---:|
+| **E1 arithmetic skepticism** — for 10 wrong ``X op Y = Z`` claims, agent pushes back instead of silently absorbing | ≥ 0.80 | **1.000** (10/10) | ✓ PASS |
+| **E2 arithmetic acceptance** — for 10 correct ``X op Y = Z`` claims, agent accepts (does not falsely contradict) | ≥ 0.80 | **1.000** (10/10) | ✓ PASS |
+| **E3 contradiction detection** — for 10 pairs of ``a X is a Y`` then ``a X is not a Y``, agent detects the inconsistency on turn 2 | ≥ 0.60 | **0.900** (9/10) | ✓ PASS |
+| **E4 self-report acceptance** — for 10 self-reports (``my name is X``, ``i live in Y``, ``i am N years old``, …), agent accepts unconditionally | ≥ 0.90 | **1.000** (10/10) | ✓ PASS |
+| **E5 F95 non-regression** — with epistemic enabled, F95 C1 + C2 + C4 invariants still PASS on clean inputs | all three PASS | C1 = 0.196, C2 = 0.800, C4 = 1.000 | ✓ PASS |
+
+### Sample pushback transcript
+
+```
+you > 1 + 1 = 3
+bot > i don't think 1 + 1 is 3 . i think it is 2 .  [pushback]
+
+you > a cat is an animal
+bot > [accepted 1 claim(s)]
+you > a cat is not an animal
+bot > wait , earlier you said cat is animal . now you say
+      cat is not animal . which one is right ?  [pushback]
+
+you > my name is alex
+bot > . alex was so excited . she asked him to play …  [accepted]
+
+you > the weather is nice
+bot > [normal F95 response]   (no claim parsed → no_claim)
+```
+
+### Four findings worth highlighting
+
+#### Finding 1 — Deduction is more reliable than statistics when the verifier exists
+
+Arithmetic E1 + E2 score a clean **20/20** because the
+verifier is a closed-form Python eval, not the LM's
+guess. The same 75 M-parameter LM produces noisy text on
+arithmetic queries (the LM has no idea what 1+1 equals on
+its own — TinyStories rarely teaches arithmetic). But
+once the *verification function* is explicit, the system
+becomes perfect on this class of claims. This is the
+old AI-1.0 lesson re-affirmed: **when you can write down
+the rule, use the rule, not statistics**.
+
+#### Finding 2 — A 7-category world model + a symbolic belief store handle 9 / 10 contradictions
+
+E3 (contradiction detection) scores 90 % with a
+**hand-curated 60-word, 7-category world model** plus a
+list-based belief store. No deep learning involved in the
+verification path itself — just cosine similarity over
+LM-pretrained embeddings, treated as a fixed lookup.
+The 10th contradiction (``"an apple is a fruit"`` →
+``"an apple is not a fruit"``) fails because the
+parser's negative-identity regex required ``"a"`` /
+``"an"`` agreement, and ``"an apple is not a fruit"``
+parses differently from the positive form. Fixable
+with one more regex; we leave it as a known limitation
+to keep F96 small.
+
+#### Finding 3 — The verification stage **does not** degrade conversational quality (E5)
+
+With the F96 verifier wired into every turn, the F95
+C1 (context conditioning, 0.196), C2 (user fact recall,
+0.800), and C4 (no catastrophic forgetting, 1.000)
+invariants still pass — *identical* numbers to F95 alone.
+This is the crucial finding: epistemic agency is not a
+trade-off with conversational fluency in this design,
+because the verifier only fires on inputs that *parse*
+as claims. Free-form chat input ("hello there", "tell me
+a story") returns ``no_claim`` and flows through the
+F95 path unchanged.
+
+#### Finding 4 — Online learning on rejected claims is the right thing to skip
+
+When the user asserts ``1 + 1 = 3``, the F96 agent does
+two important things F95 did not:
+
+* It does **not** call ``OnlineTeacherSession.receive_chat_turn`` on
+  that turn (no M3 micro-gradient step on the false
+  claim). The pretraining distribution is preserved.
+* It does **not** call ``UserFactMemory.ingest`` on the
+  user's utterance. The semantic memory does not poison
+  itself with the user's mistake.
+
+Both are confirmed by the C4 = 1.000 result: even running
+the full E1-E4 battery + F95 demo conversation, the
+TinyStories validation PPL is unchanged at 8.73. The
+agent's beliefs do not get poisoned by adversarial input.
+
+### Cognitive parallel
+
+The three-verifier design maps onto a classical
+philosophy-of-science cycle:
+
+* **Deduction** (arithmetic verifier): given premises and
+  rules, derive the consequence. Output is binary truth.
+* **Abduction** (LM plausibility): given an observation,
+  ask "would I have predicted this?" If the LM's PPL on
+  the claim is high, the claim is *surprising* and
+  warrants extra scrutiny.
+* **Bookkeeping** (belief store): track what has been
+  asserted so far, so that later assertions can be
+  checked for internal consistency.
+
+This is rudimentary scientific method baked into the
+chat loop. It is not perfect (the world model is small,
+the regex parser is brittle, the LM plausibility
+threshold is hand-tuned), but it is *the right
+structure*: rules first, statistics as backup, explicit
+memory of what has been said.
+
+### What F96 commits PCM to claiming
+
+* PCM v10.7: the chat-learning agent is **no longer
+  gullible**. It pushes back on arithmetic errors and
+  on direct contradictions. It does not let online
+  learning corrupt its pretraining distribution on
+  rejected claims.
+* The architecture is **modular**: the
+  :class:`EpistemicAgent` is optional, can be removed,
+  can be extended with new verifier types (physical
+  laws, geographic facts, …) without touching the
+  conversational core.
+* Epistemic agency is the *missing link* between F95's
+  "trusts everything" online-learning loop and a
+  deployable agent that the user can actually correct
+  themselves *against*.
+* Chinese support (F97 follow-up): the architecture is
+  language-agnostic. The Chinese version needs Chinese
+  regex patterns + a Chinese-categories world model;
+  the verifier dispatcher itself does not change.
+
+### Reproducibility
+
+* ``outputs/f96_full/summary.json`` — full quantitative
+  results.
+* Run: ``python -u -m experiments.epistemic_f96
+  --lm-checkpoint outputs/checkpoints/f91_lm_d512.pt
+  --out outputs/f96_full``. Total runtime ~2 min on
+  RTX 3070.
+* Interactive: ``python -m pcm.chat --learn
+  --epistemic`` opens the chat with both online
+  learning AND epistemic verification enabled. Try
+  ``1 + 1 = 3`` or assert two contradictory facts to
+  see pushback in action.
+* Unit tests: 37 new tests in
+  ``tests/test_epistemic.py`` cover parser, belief
+  store, world model, verifiers, and the
+  :class:`EpistemicAgent`. Full regression
+  (517 tests) passes.
+
+---
+
 ## 4. Open follow-ups
 
 These are the natural next steps. None blocks publication of

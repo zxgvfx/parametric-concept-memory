@@ -46,6 +46,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .episodic import EpisodicBuffer
+from .epistemic import EpistemicAgent, EpistemicResult
 from .user_memory import UserFact, UserFactMemory
 
 
@@ -178,6 +179,14 @@ class ChatTurn:
                                     # under the model (agent
                                     # responses use the surprise
                                     # of the *user's next* turn)
+    epistemic_action: str | None = None
+                                    # "accept" / "pushback" /
+                                    # "uncertain" / "no_claim"
+                                    # for user turns when an
+                                    # EpistemicAgent is attached
+    epistemic_claims: list[str] = field(default_factory=list)
+                                    # short-form claims extracted
+                                    # from this turn
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -247,6 +256,7 @@ class ChatSession:
         user_memory: UserFactMemory | None = None,
         episodic: EpisodicBuffer | None = None,
         teacher=None,           # OnlineTeacherSession | None
+        epistemic: EpistemicAgent | None = None,
         pad_id: int = 0,
         eos_id: int | None = None,
         unk_id: int = 1,
@@ -269,6 +279,7 @@ class ChatSession:
             device=str(device),
         )
         self.teacher = teacher
+        self.epistemic = epistemic
         self.pad_id = pad_id
         self.eos_id = eos_id
         self.unk_id = unk_id
@@ -382,14 +393,25 @@ class ChatSession:
         Workflow:
 
         1. Encode user text → tokens.
-        2. Run online learning on the *previous* agent response
-           (if any), using the *current* user input as the
-           correction signal.
-        3. Episodic-write the user turn.
-        4. Extract any new user facts from the user text.
-        5. Build prompt = optional fact prefix + last 8 turns.
-        6. Generate response tokens.
-        7. Episodic-write the agent turn.
+        2. **(F96) Epistemic check.** Parse user text into
+           structured claims and verify each against the
+           belief store / world model / LM plausibility.
+           * ``contradicted`` → return a templated pushback,
+             skip generation, skip online learning, skip
+             user-fact ingestion (don't learn from a
+             rejected claim).
+           * ``uncertain`` → continue normally but prepend a
+             hedge prefix to the response.
+           * ``accept`` / ``no_claim`` → continue normally.
+        3. Online learning on the *previous* agent response
+           using the *current* user input as the correction
+           signal.
+        4. Episodic-write the user turn.
+        5. Extract any new user facts from the user text.
+        6. Build prompt = optional fact prefix + last 8
+           turns.
+        7. Generate response tokens.
+        8. Episodic-write the agent turn.
         """
         self.t += 1
         user_ids = self.encode_text(user_text)
@@ -397,43 +419,103 @@ class ChatSession:
             (user_ids == self.unk_id).sum().item()
         )
 
-        # 1. Online learning: feed previous agent context →
-        #    real user response back to the teacher.
-        if self.teacher is not None and self._last_agent_ids is not None:
+        # F96 epistemic check (BEFORE any side effects like
+        # online learning or fact ingestion).
+        epi_action = "no_claim"
+        epi_claims_short: list[str] = []
+        epi_result: EpistemicResult | None = None
+        if self.epistemic is not None:
+            epi_result = self.epistemic.process(
+                user_text, t=self.t,
+            )
+            epi_action = epi_result.action
+            epi_claims_short = [
+                o.claim.short() for o in epi_result.outcomes
+            ]
+
+        # If pushback, short-circuit: record both turns and
+        # return the templated pushback. Do NOT teach the LM,
+        # do NOT ingest user facts (the user is wrong).
+        if (
+            epi_result is not None
+            and epi_action == "pushback"
+            and epi_result.pushback_text is not None
+        ):
+            self._episodic_write(
+                user_ids.to(self.device), role="user",
+            )
+            self.turns.append(ChatTurn(
+                role="user", text=user_text,
+                ids=user_ids.tolist(),
+                t=self.t, n_oov=n_oov,
+                new_user_facts=[],
+                epistemic_action=epi_action,
+                epistemic_claims=epi_claims_short,
+            ))
+            pushback = epi_result.pushback_text
+            pushback_ids = self.encode_text(pushback)
+            self.turns.append(ChatTurn(
+                role="agent", text=pushback,
+                ids=pushback_ids.tolist(),
+                t=self.t, n_oov=0,
+                new_user_facts=[],
+                epistemic_action="pushback",
+                epistemic_claims=epi_claims_short,
+            ))
+            self._episodic_write(
+                pushback_ids.to(self.device), role="agent",
+            )
+            self._last_agent_ids = pushback_ids
+            return pushback
+
+        # 3. Online learning: feed previous agent context →
+        #    real user response back to the teacher. Skip if
+        #    the epistemic check was uncertain (we don't want
+        #    to update weights from doubtful claims).
+        safe_to_teach = epi_action in ("accept", "no_claim")
+        if (
+            self.teacher is not None
+            and self._last_agent_ids is not None
+            and safe_to_teach
+        ):
             self.teacher.receive_chat_turn(
                 context_ids=self._last_agent_ids.cpu(),
                 target_ids=user_ids.cpu(),
             )
 
-        # 2. Episodic write for the user turn.
-        self._episodic_write(user_ids.to(self.device), role="user")
+        # 4. Episodic write for the user turn.
+        self._episodic_write(
+            user_ids.to(self.device), role="user",
+        )
 
-        # 3. Extract new user facts (semantic memory).
-        new_facts = self.user_memory.ingest(user_text, t=self.t)
+        # 5. Extract new user facts (semantic memory). Self-
+        #    reports are always safe; identity claims that
+        #    were marked "uncertain" pass through unverified.
+        new_facts = self.user_memory.ingest(
+            user_text, t=self.t,
+        )
 
-        # 4. Save turn before building the prompt that the
-        #    response is conditioned on (so the latest user text
-        #    is part of the context).
+        # 6. Save turn before building the prompt.
         self.turns.append(ChatTurn(
             role="user", text=user_text,
             ids=user_ids.tolist(),
             t=self.t, n_oov=n_oov,
             new_user_facts=new_facts,
+            epistemic_action=epi_action,
+            epistemic_claims=epi_claims_short,
         ))
 
-        # 5. Build context. Optionally prepend a fact prefix.
+        # 7. Build context. Optionally prepend a fact prefix.
         ctx_ids = self._build_context().tolist()
         prefix = self._fact_prefix(user_text)
         full_ids = prefix + ctx_ids
         full_ids = full_ids[-self.max_context_len:]
         ctx = torch.tensor(full_ids, dtype=torch.long)
 
-        # 6. Generate agent response. When a fact prefix is
-        # injected, we DISABLE repetition_penalty for this turn
-        # so the LM can actually echo the injected fact word —
-        # otherwise the penalty (which divides logits of seen
-        # tokens) actively suppresses the fact's reappearance,
-        # which is the opposite of what RAG-lite needs.
+        # 8. Generate agent response. When a fact prefix is
+        # injected, we DISABLE repetition_penalty for this
+        # turn so the LM can actually echo the injected fact
+        # word.
         rep_pen = (
             1.0 if prefix else self.repetition_penalty
         )
@@ -449,12 +531,25 @@ class ChatSession:
         )
         agent_text = self.decode_ids(new_ids)
 
-        # 7. Record + episodic-write agent turn.
+        # If uncertain, prepend a hedge so the agent's voice
+        # carries the doubt without rewriting the LM output.
+        if (
+            epi_result is not None
+            and epi_action == "uncertain"
+            and epi_result.hedge_prefix is not None
+        ):
+            agent_text = (
+                epi_result.hedge_prefix + agent_text
+            )
+
+        # 9. Record + episodic-write agent turn.
         self.turns.append(ChatTurn(
             role="agent", text=agent_text,
             ids=new_ids.cpu().tolist(),
             t=self.t, n_oov=0,
             new_user_facts=[],
+            epistemic_action=epi_action,
+            epistemic_claims=[],
         ))
         self._episodic_write(new_ids, role="agent")
         self._last_agent_ids = new_ids
@@ -489,6 +584,20 @@ class ChatSession:
             "n_online_grad_steps": (
                 self.teacher.counters.n_m3_grad_steps
                 if self.teacher else 0
+            ),
+            "n_pushbacks": sum(
+                1 for t in self.turns
+                if t.role == "agent"
+                and t.epistemic_action == "pushback"
+            ),
+            "n_hedged": sum(
+                1 for t in self.turns
+                if t.role == "agent"
+                and t.epistemic_action == "uncertain"
+            ),
+            "n_beliefs": (
+                len(self.epistemic.belief_store)
+                if self.epistemic else 0
             ),
         }
 
@@ -565,6 +674,12 @@ def _cli() -> None:
         "--learn", action="store_true", default=False,
         help="enable online learning (M3 grad step per turn)",
     )
+    ap.add_argument(
+        "--epistemic", action="store_true", default=False,
+        help="enable F96 epistemic agency: parse user "
+             "claims, verify against arithmetic / belief "
+             "store / world model, push back on errors",
+    )
     ap.add_argument("--seed", type=int, default=2026)
     args = ap.parse_args()
 
@@ -603,6 +718,16 @@ def _cli() -> None:
     )
     lm.to(device)
 
+    from pcm.epistemic import EpistemicAgent as _EpistemicAgent
+    epistemic: _EpistemicAgent | None = None
+    if args.epistemic:
+        print("  building epistemic agent (world model + verifiers)...")
+        epistemic = _EpistemicAgent(
+            lm=lm, stoi=stoi, use_lm_plausibility=True,
+            pad_id=_PAD, device=device,
+        )
+        print("  epistemic: ON (will push back on errors)")
+
     teacher: OnlineTeacherSession | None = None
     if args.learn:
         print("  populating replay buffer for online learning...")
@@ -630,7 +755,8 @@ def _cli() -> None:
     sess = ChatSession(
         lm, stoi, itos,
         unk_id=_UNK, pad_id=_PAD, eos_id=_EOS,
-        teacher=teacher, device=device,
+        teacher=teacher, epistemic=epistemic,
+        device=device,
         max_response_tokens=args.max_response_tokens,
         temperature=args.temperature,
         top_k=args.top_k, top_p=args.top_p,
@@ -708,7 +834,19 @@ def _cli() -> None:
             f" ({n_oov}/{n_user_tokens} OOV)"
             if n_oov > 0 else ""
         )
-        print(f"bot > {agent}{oov_str}")
+        epi_act = sess.turns[-2].epistemic_action
+        epi_str = ""
+        if epi_act == "pushback":
+            epi_str = "  [pushback]"
+        elif epi_act == "uncertain":
+            epi_str = "  [hedged]"
+        elif epi_act == "accept":
+            n_claims = len(sess.turns[-2].epistemic_claims)
+            if n_claims > 0:
+                epi_str = (
+                    f"  [accepted {n_claims} claim(s)]"
+                )
+        print(f"bot > {agent}{oov_str}{epi_str}")
         new_facts = sess.turns[-2].new_user_facts
         if new_facts:
             for f in new_facts:
