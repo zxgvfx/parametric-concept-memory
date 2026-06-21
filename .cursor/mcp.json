@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "persistent-chat": {
+      "command": "node",
+      "args": [
+        "C:\\Users\\net02\\.cursor-loop\\bridge.js",
+        "--workspace=c:\\Users\\net02\\Documents\\WORK\\parametric-concept-memory"
+      ],
+      "disabled": false,
+      "autoApprove": [
+        "wait_for_user_input",
+        "init_conversation",
+        "merge_conversation",
+        "select_conversation"
+      ]
+    }
+  }
+}
